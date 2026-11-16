@@ -3,7 +3,8 @@
 # CMake build of openfat for 32/64-bit hosts and kernels (GDOS). The host
 # tests and the OpenWatcom check use the Makefile.
 #
-# OpenFAT::fat   reading and writing exFAT, formatting FAT12/16/32 and exFAT
+# OpenFAT::fat   reading and writing exFAT, formatting FAT12/16/32 and exFAT,
+#                reading NTFS
 #                (needs only string.h)
 # OpenFAT::check checking/repairing and defragmenting (also needs stdio.h
 #                for its messages)
@@ -21,7 +22,8 @@ add_library(openfat_fat STATIC
   src/exfat/upcase.c
   src/fat/fat.c
   src/fat/fat_format.c
-  src/part/part.c)
+  src/part/part.c
+  src/ntfs/ntfs.c)
 target_include_directories(openfat_fat PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/include")
 add_library(OpenFAT::fat ALIAS openfat_fat)
 

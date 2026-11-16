@@ -18,7 +18,7 @@ H        := $(BUILD)/host
 
 TESTBINS := $(H)/test_exfat $(H)/test_exfat_write $(H)/test_exchk $(H)/test_exfmt \
 	$(H)/test_fatchk $(H)/test_defrag $(H)/test_fat_format $(H)/test_part $(H)/test_fat_write $(H)/test_exfat_big \
-	$(H)/ofimg
+	$(H)/ofimg $(H)/test_ntfs
 
 .PHONY: all test check dos-check clean
 all: $(TESTBINS)
@@ -39,10 +39,12 @@ check: all test dos-check
 	bash tests/exfat_write.sh
 	bash tests/exfat_big.sh
 	bash tests/ofimg_host.sh
+	bash tests/ntfs_host.sh
 
 $(H)/test_exfat: tests/exfat_test.c $(EXFAT) $(HDR)
 $(H)/test_exfat_write: tests/exfat_write_test.c $(EXFAT) $(HDR)
 $(H)/test_exfat_big: tests/exfat_big_test.c $(EXFAT) $(HDR)
+$(H)/test_ntfs: tests/ntfs_test.c src/ntfs/ntfs.c $(CPSRC) $(HDR)
 $(H)/test_exchk: tests/exchk_test.c src/exfat/exfat_check.c $(EXFAT) $(HDR)
 $(H)/test_exfmt: tests/exfmt_test.c src/exfat/exfat_format.c src/exfat/upcase.c $(HDR)
 $(H)/test_fatchk: tests/fatchk_test.c src/fat/fat_check.c $(CPSRC) $(HDR)

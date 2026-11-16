@@ -1,6 +1,6 @@
 # openfat
 
-Portable FAT12, FAT16, FAT32 and exFAT code in C90. It builds with OpenWatcom
+Portable FAT12, FAT16, FAT32 and exFAT code in C90, and reading NTFS. It builds with OpenWatcom
 for 16-bit DOS and with Clang or GCC for 32/64-bit hosts and kernels. The
 library does no I/O of its own: sectors come and go through callbacks of the
 caller. That way one code base serves the DOS drivers and tools of
@@ -19,6 +19,7 @@ GonWare.
 | FAT check | `src/fat/fat_check.c` | checking and repairing FAT12/16/32 after the rules of fsck.fat |
 | FAT defrag | `src/fat/fat_defrag.c` | defragmenting FAT12/16/32, in a write order that survives power loss |
 | Image tool | `tools/ofimg.c` | host tool: formats an exFAT volume in a disk image (a partition or a superfloppy), makes directories and puts files, without mounting it (mtools knows no exFAT): `ofimg IMAGE START format SECTORS [LABEL] mkdir PATH put FILE PATH …` |
+| NTFS | `src/ntfs/ntfs.c` | read-only: MFT records, runlists (fragmented and sparse files), attribute lists, directory indexes, 8.3 names (the DOS names Windows gave, else `~n`), label, free space; not compressed or encrypted files; sectors of 512 bytes |
 
 Sector numbers (`ofat_lba`) and file sizes (`ofat_fsize`) have 64 bits in
 32/64-bit builds: exFAT volumes past 2 TiB, files of 4 GiB and more, FAT and
@@ -49,8 +50,11 @@ root). The tests load the code pages from `UNITAB` (default
 `../mars-unicode-tables/TAB/unitables`, a checkout next to this one).
 `src/latin.c` is made by `tools/mklatin.py` from `UCD/UnicodeData.txt` of
 the same repository.
+For NTFS they also need ntfsprogs (mkntfs, ntfsinfo, ntfsfix), ntfs-3g with
+FUSE, and setfattr.  ntfs-3g's layout.h is the reference for the NTFS
+structures.
 
-CMake (as a subproject) gives `OpenFAT::fat` and `OpenFAT::check`.
+CMake (as a subproject) gives `OpenFAT::fat` (with NTFS reading) and `OpenFAT::check`.
 
 ## History
 
