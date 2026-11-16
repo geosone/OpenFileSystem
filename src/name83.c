@@ -20,8 +20,11 @@ static int part83(const struct ofat_cp *cp, const ofat_u16 *name, unsigned len, 
     ofat_u8 c;
     for (i = 0; i < len; ++i) {
         c = ofat_cp_upper(cp, name[i]);
-        /* an accented Latin letter the code page lacks: its base letter */
-        if (!c && (c = ofat_latin_base(ofat_unicode_upper(name[i]))) != 0) lossy = 1;
+        /* an accented Latin letter the code page lacks: its base letter
+           (ofat_latin_base has both cases, so no Unicode upper case and
+           its table: the same for every character, and DOS drivers stay
+           small) */
+        if (!c && (c = ofat_latin_base(name[i])) != 0) lossy = 1;
         /* as NSS (and NT): spaces, dots and characters the code page
            lacks are left out, other invalid ones become "_" */
         if (!c || c == ' ' || c == '.') { lossy = 1; continue; }
