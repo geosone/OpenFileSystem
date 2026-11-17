@@ -111,15 +111,98 @@ static int fixup(ofat_u8 *b, unsigned size)
     return OFAT_NTFS_OK;
 }
 
-static int mft_sector(const struct ofat_ntfs *v, ofat_u32 s, ofat_lba *lba)
+static int mft_sector(struct ofat_ntfs *v, ofat_u32 s, ofat_lba *lba);
+static int attr_is(const ofat_u8 *a, ofat_u32 len, ofat_u32 type, int i30, ofat_u32 vcn);
+static const ofat_u8 *find_attr(const struct ofat_ntfs *v, const ofat_u8 *b, ofat_u32 type, int i30);
+static const ofat_u8 *res_value(const ofat_u8 *a, ofat_u32 *len);
+
+/* record no of $MFT into idx through the runs known so far (for
+   mft_sector: no new lookups from here) */
+static int mft_raw(struct ofat_ntfs *v, ofat_u32 no)
+{
+    unsigned n = v->rec_size / 512, i;
+    ofat_lba lba;
+    int r;
+    v->idx_no = NONE;
+    for (i = 0; i < n; ++i) {
+        if ((r = mft_sector(v, no * n + i, &lba))) return r;
+        if (v->buf_lba == lba) v->buf_lba = NOBUF;
+        if (v->read(v->dev, v->start + lba, v->idx + i * 512)) return OFAT_NTFS_EIO;
+    }
+    if (memcmp(v->idx, "FILE", 4) || fixup(v->idx, v->rec_size) || !(rd16(v->idx + 0x16) & 1))
+        return OFAT_NTFS_EBAD;
+    return OFAT_NTFS_OK;
+}
+
+/* the run of $MFT's data with vcn from its runlist (record 0, or the
+   record its attribute list names), into the cache */
+static int mft_lookup(struct ofat_ntfs *v, ofat_u32 vcn)
+{
+    const ofat_u8 *a, *l, *end, *val, *rend;
+    ofat_u32 alen, len, target = NONE;
+    struct ofat_ntfs_run r;
+    int rc, pass;
+    for (pass = 0; pass < 2; ++pass) {
+        if ((rc = mft_raw(v, pass ? target : 0))) return rc;
+        rend = v->idx + v->rec_size;
+        for (a = v->idx + rd16(v->idx + 0x14); a + 0x18 <= rend && rd32(a) != AT_END; a += alen) {
+            alen = rd32(a + 4);
+            if (alen < 0x18 || alen > (ofat_u32)(rend - a)) return OFAT_NTFS_EBAD;
+            if (attr_is(a, alen, AT_DATA, 0, vcn) && a[8]) {
+                if ((rc = attr_run(a, vcn, &r))) return rc == OFAT_NTFS_END ? OFAT_NTFS_EBAD : rc;
+                if (r.lcn == NONE) return OFAT_NTFS_EBAD;
+                if (v->mft_nruns < OFAT_NTFS_MFTRUNS) v->mft[v->mft_nruns++] = r;
+                else {
+                    v->mft[v->mft_next] = r;    /* the first run stays */
+                    if (++v->mft_next == OFAT_NTFS_MFTRUNS) v->mft_next = 1;
+                }
+                return OFAT_NTFS_OK;
+            }
+        }
+        /* not in this record: the attribute list of record 0 */
+        if (pass || !(l = find_attr(v, v->idx, AT_LIST, 0))) break;
+        if (l[8]) {                             /* non-resident: into idx */
+            ofat_u8 la[128];
+            ofat_u32 i;
+            ofat_lba lba;
+            if ((alen = rd32(l + 4)) > sizeof(la) || rd32(l + 0x34) || (len = rd32(l + 0x30)) > OFAT_NTFS_MAXREC)
+                return OFAT_NTFS_ESIZE;
+            memcpy(la, l, alen);
+            for (i = 0; i * 512 < len; ++i) {
+                if ((rc = attr_sector(v, la, i, &lba))) return rc;
+                if (lba == NOBUF) return OFAT_NTFS_EBAD;
+                if (v->buf_lba == lba) v->buf_lba = NOBUF;
+                if (v->read(v->dev, v->start + lba, v->idx + i * 512)) return OFAT_NTFS_EIO;
+            }
+            val = v->idx;
+        } else if (!(val = res_value(l, &len))) break;
+        for (l = val, end = val + len; l + 0x1A <= end && rd16(l + 4) >= 0x1A && l + rd16(l + 4) <= end; l += rd16(l + 4)) {
+            if (rd32(l) != AT_DATA || l[6]) continue;
+            if (rd32(l + 0x0C) || rd32(l + 8) > vcn) break;
+            target = rd32(l + 0x10);
+        }
+        if (target == NONE || !target) break;
+    }
+    return OFAT_NTFS_EBAD;
+}
+
+static int mft_sector(struct ofat_ntfs *v, ofat_u32 s, ofat_lba *lba)
 {
     ofat_u32 vcn = s >> v->cshift;
-    unsigned i;
-    for (i = 0; i < v->mft_nruns; ++i)
-        if (vcn >= v->mft[i].vcn && vcn - v->mft[i].vcn < v->mft[i].len) {
-            *lba = ((ofat_lba)(v->mft[i].lcn + (vcn - v->mft[i].vcn)) << v->cshift) + (s & ((1UL << v->cshift) - 1));
-            return OFAT_NTFS_OK;
-        }
+    unsigned i, tries;
+    int rc;
+    for (tries = 0; tries < 2; ++tries) {
+        for (i = 0; i < v->mft_nruns; ++i)
+            if (vcn >= v->mft[i].vcn && vcn - v->mft[i].vcn < v->mft[i].len) {
+                *lba = ((ofat_lba)(v->mft[i].lcn + (vcn - v->mft[i].vcn)) << v->cshift) + (s & ((1UL << v->cshift) - 1));
+                return OFAT_NTFS_OK;
+            }
+        if (tries || v->mft_busy) break;
+        v->mft_busy = 1;
+        rc = mft_lookup(v, vcn);
+        v->mft_busy = 0;
+        if (rc) return rc;
+    }
     return OFAT_NTFS_EBAD;
 }
 
@@ -166,8 +249,9 @@ static const ofat_u8 *find_attr(const struct ofat_ntfs *v, const ofat_u8 *b, ofa
 /* the value of a resident attribute, *len its length */
 static const ofat_u8 *res_value(const ofat_u8 *a, ofat_u32 *len)
 {
+    ofat_u32 alen = rd32(a + 4), voff = rd16(a + 0x14);
     *len = rd32(a + 0x10);
-    if (a[8] || rd16(a + 0x14) + *len > rd32(a + 4)) return 0;
+    if (a[8] || voff > alen || *len > alen - voff) return 0;    /* no wrap */
     return a + rd16(a + 0x14);
 }
 
@@ -249,7 +333,7 @@ int ofat_ntfs_mount(struct ofat_ntfs *v, ofat_ntfs_read_fn read, void *dev, ofat
     v->mft[0].vcn = 0; v->mft[0].len = (rs + (512UL << v->cshift) - 1) >> (9 + v->cshift);
     v->mft[0].lcn = rd32(b + 0x30);
     if (rd32(b + 0x34)) return OFAT_NTFS_ESIZE;
-    v->mft_nruns = 1;
+    v->mft_nruns = 1; v->mft_next = 1;
     if ((rc = load_rec(v, 0, v->rec, &v->rec_no))) return rc == OFAT_NTFS_END ? OFAT_NTFS_EBAD : rc;
     if (!(a = find_attr(v, v->rec, AT_DATA, 0)) || !a[8]) return OFAT_NTFS_EBAD;
     alen = rd32(a + 0x18) + 1;                  /* highest VCN + 1 */
@@ -282,17 +366,34 @@ void ofat_ntfs_rootdir(const struct ofat_ntfs *v, struct ofat_ntfs_file *f)
 
 /* ---- file data ---- */
 
-/* the unnamed $DATA of record no covering vcn, in rec2 (through a resident
-   attribute list): *a, or 0 and the sizes from the first extent */
-static int data_attr(struct ofat_ntfs *v, ofat_u32 no, ofat_u32 vcn, const ofat_u8 **pa)
+/* Does the attribute a of a record match type, name ("$I30" when i30, else
+   none) and, when non-resident, cover vcn? */
+static int attr_is(const ofat_u8 *a, ofat_u32 len, ofat_u32 type, int i30, ofat_u32 vcn)
 {
-    const ofat_u8 *a, *l, *end, *val;
-    ofat_u32 len, target = NONE;
-    int rc;
-    if ((rc = load_rec(v, no, v->rec2, &v->rec2_no))) return rc == OFAT_NTFS_END ? OFAT_NTFS_EBAD : rc;
-    a = find_attr(v, v->rec2, AT_DATA, 0);
-    if (a && (!a[8] || (vcn >= rd32(a + 0x10) && vcn <= rd32(a + 0x18)))) { *pa = a; return OFAT_NTFS_OK; }
-    if (!(l = find_attr(v, v->rec2, AT_LIST, 0))) return a ? (*pa = a, OFAT_NTFS_OK) : OFAT_NTFS_EBAD;
+    if (rd32(a) != type) return 0;
+    if (i30 ? a[9] != 4 || (ofat_u32)rd16(a + 0x0A) + 8 > len ||
+              memcmp(a + rd16(a + 0x0A), "$\0I\0" "3\0" "0\0", 8) : a[9] != 0) return 0;
+    return !a[8] || (len >= 0x40 && vcn >= rd32(a + 0x10) && vcn <= rd32(a + 0x18));
+}
+
+/* The attribute of type (named "$I30" when i30) of record no that covers
+   vcn (resident ones: any vcn), through the attribute list when the record
+   has one (a non-resident list is read into idx): *pa points into b, which
+   then holds the record it is in (*cached its number).  END when the
+   record has no such attribute. */
+static int ext_attr(struct ofat_ntfs *v, ofat_u32 no, ofat_u32 type, int i30, ofat_u32 vcn,
+                    ofat_u8 *b, ofat_u32 *cached, const ofat_u8 **pa)
+{
+    const ofat_u8 *a, *l, *end, *val, *rend;
+    ofat_u32 len, target = NONE, alen;
+    int rc, any = 0;
+    if ((rc = load_rec(v, no, b, cached))) return rc == OFAT_NTFS_END ? OFAT_NTFS_EBAD : rc;
+    for (a = b + rd16(b + 0x14), rend = b + v->rec_size; a + 0x18 <= rend && rd32(a) != AT_END; a += alen) {
+        alen = rd32(a + 4);
+        if (alen < 0x18 || alen > (ofat_u32)(rend - a)) return OFAT_NTFS_EBAD;
+        if (attr_is(a, alen, type, i30, vcn)) { *pa = a; return OFAT_NTFS_OK; }
+    }
+    if (!(l = find_attr(v, b, AT_LIST, 0))) return OFAT_NTFS_END;
     if (l[8]) {                                 /* non-resident: into idx */
         ofat_u32 i;
         ofat_lba lba;
@@ -306,21 +407,31 @@ static int data_attr(struct ofat_ntfs *v, ofat_u32 no, ofat_u32 vcn, const ofat_
         }
         val = v->idx;
     } else if (!(val = res_value(l, &len))) return OFAT_NTFS_EBAD;
-    for (l = val, end = val + len; l + 0x1A <= end && rd16(l + 4) >= 0x1A; l += rd16(l + 4)) {
-        if (rd32(l) != AT_DATA || l[6]) continue;
-        if (rd32(l + 8) > vcn) break;
+    /* the last entry of the type that starts at or before vcn */
+    for (l = val, end = val + len; l + 0x1A <= end && rd16(l + 4) >= 0x1A && l + rd16(l + 4) <= end; l += rd16(l + 4)) {
+        if (rd32(l) != type) continue;
+        if (i30 ? l[6] != 4 || l + l[7] + 8 > end || memcmp(l + l[7], "$\0I\0" "3\0" "0\0", 8) : l[6] != 0)
+            continue;
+        any = 1;
+        if (rd32(l + 0x0C) || rd32(l + 8) > vcn) break;
         target = rd32(l + 0x10);
     }
-    if (target == NONE) return OFAT_NTFS_EBAD;
-    if (target == no) return a ? (*pa = a, OFAT_NTFS_OK) : OFAT_NTFS_EBAD;
-    if ((rc = load_rec(v, target, v->rec2, &v->rec2_no))) return rc == OFAT_NTFS_END ? OFAT_NTFS_EBAD : rc;
-    for (a = v->rec2 + rd16(v->rec2 + 0x14); a + 0x18 <= v->rec2 + v->rec_size && rd32(a) != AT_END; a += rd32(a + 4)) {
-        if (rd32(a + 4) < 0x18) break;
-        if (rd32(a) == AT_DATA && !a[9] && a[8] && vcn >= rd32(a + 0x10) && vcn <= rd32(a + 0x18)) {
-            *pa = a; return OFAT_NTFS_OK;
-        }
+    if (target == NONE) return any ? OFAT_NTFS_EBAD : OFAT_NTFS_END;
+    if (target == no) return OFAT_NTFS_EBAD;   /* it was not in the record */
+    if ((rc = load_rec(v, target, b, cached))) return rc == OFAT_NTFS_END ? OFAT_NTFS_EBAD : rc;
+    for (a = b + rd16(b + 0x14); a + 0x18 <= rend && rd32(a) != AT_END; a += alen) {
+        alen = rd32(a + 4);
+        if (alen < 0x18 || alen > (ofat_u32)(rend - a)) return OFAT_NTFS_EBAD;
+        if (attr_is(a, alen, type, i30, vcn)) { *pa = a; return OFAT_NTFS_OK; }
     }
     return OFAT_NTFS_EBAD;
+}
+
+/* the unnamed $DATA of record no covering vcn, in rec2 */
+static int data_attr(struct ofat_ntfs *v, ofat_u32 no, ofat_u32 vcn, const ofat_u8 **pa)
+{
+    int rc = ext_attr(v, no, AT_DATA, 0, vcn, v->rec2, &v->rec2_no, pa);
+    return rc == OFAT_NTFS_END ? OFAT_NTFS_EBAD : rc;
 }
 
 int ofat_ntfs_read(struct ofat_ntfs *v, struct ofat_ntfs_file *f, ofat_fsize off, void OFAT_FAR *buf,
@@ -407,6 +518,9 @@ static int stat_rec(struct ofat_ntfs *v, ofat_u32 no, struct ofat_ntfs_ent *e)
     }
     fl = rd16(a + 0x0C);
     if (fl & 0x40FF) f->nofat = 2;              /* compressed, encrypted */
+    /* the size within the allocated size (holes of sparse files count) */
+    if (rd32(a + 0x34) > rd32(a + 0x2C) || (rd32(a + 0x34) == rd32(a + 0x2C) && rd32(a + 0x30) > rd32(a + 0x28)))
+        return OFAT_NTFS_EBAD;
 #if defined(__WATCOMC__) || defined(OFAT_NARROW)
     if (rd32(a + 0x34)) { f->big = 1; f->size = 0xFFFFFFFFUL; }
     else f->size = rd32(a + 0x30);
@@ -430,15 +544,18 @@ static int stat_rec(struct ofat_ntfs *v, ofat_u32 no, struct ofat_ntfs_ent *e)
 static int load_idx(struct ofat_ntfs *v, ofat_u32 dir, ofat_u32 k)
 {
     const ofat_u8 *a, *bm, *val;
-    ofat_u32 len, s, n = v->idx_size / 512, i, blocks;
-    ofat_lba lba;
+    ofat_u32 len, s, n = v->idx_size / 512, i, blocks, vcn;
+    ofat_lba lba, lbas[OFAT_NTFS_MAXREC / 512];
     int rc;
     if (v->idx_dir == dir && v->idx_no == k) return OFAT_NTFS_OK;
-    if ((rc = load_rec(v, dir, v->rec, &v->rec_no))) return rc == OFAT_NTFS_END ? OFAT_NTFS_EBAD : rc;
-    if (!(a = find_attr(v, v->rec, AT_IALLOC, 1)) || !a[8]) return OFAT_NTFS_END;
+    rc = ext_attr(v, dir, AT_IALLOC, 1, 0, v->rec, &v->rec_no, &a);
+    if (rc == OFAT_NTFS_END) return OFAT_NTFS_END;
+    if (rc) return rc;
+    if (!a[8]) return OFAT_NTFS_END;
     blocks = rd32(a + 0x34) ? NONE : rd32(a + 0x30) / v->idx_size;
     if (k >= blocks) return OFAT_NTFS_END;
-    if ((bm = find_attr(v, v->rec, AT_BITMAP, 1))) {
+    rc = ext_attr(v, dir, AT_BITMAP, 1, (k / 4096) >> v->cshift, v->rec, &v->rec_no, &bm);
+    if (!rc) {
         if (!bm[8]) {
             if (!(val = res_value(bm, &len))) return OFAT_NTFS_EBAD;
             if (k / 8 < len && !(val[k / 8] >> (k & 7) & 1)) return UNUSED;
@@ -448,14 +565,24 @@ static int load_idx(struct ofat_ntfs *v, ofat_u32 dir, ofat_u32 k)
             if (!(val = sector(v, lba))) return OFAT_NTFS_EIO;
             if (!(val[k / 8 % 512] >> (k & 7) & 1)) return UNUSED;
         }
-    }
-    v->idx_no = NONE;
+    } else if (rc != OFAT_NTFS_END) return rc;
+    if ((rc = ext_attr(v, dir, AT_IALLOC, 1, (k * n) >> v->cshift, v->rec, &v->rec_no, &a)))
+        return rc == OFAT_NTFS_END ? OFAT_NTFS_EBAD : rc;
+    /* the sectors of the block first (finding another extent may read a
+       non-resident attribute list into idx), then the block */
     s = k * n;
     for (i = 0; i < n; ++i) {
-        if ((rc = attr_sector(v, a, s + i, &lba))) return rc;
-        if (lba == NOBUF) return OFAT_NTFS_EBAD;
-        if (v->buf_lba == lba) v->buf_lba = NOBUF;
-        if (v->read(v->dev, v->start + lba, v->idx + i * 512)) return OFAT_NTFS_EIO;
+        vcn = (s + i) >> v->cshift;
+        if (!a[8] || vcn < rd32(a + 0x10) || vcn > rd32(a + 0x18))
+            if ((rc = ext_attr(v, dir, AT_IALLOC, 1, vcn, v->rec, &v->rec_no, &a)))
+                return rc == OFAT_NTFS_END ? OFAT_NTFS_EBAD : rc;
+        if ((rc = attr_sector(v, a, s + i, &lbas[i]))) return rc;
+        if (lbas[i] == NOBUF) return OFAT_NTFS_EBAD;
+    }
+    v->idx_no = NONE;
+    for (i = 0; i < n; ++i) {
+        if (v->buf_lba == lbas[i]) v->buf_lba = NOBUF;
+        if (v->read(v->dev, v->start + lbas[i], v->idx + i * 512)) return OFAT_NTFS_EIO;
     }
     if (memcmp(v->idx, "INDX", 4) || fixup(v->idx, v->idx_size)) return OFAT_NTFS_EBAD;
     v->idx_dir = dir; v->idx_no = k;
@@ -471,9 +598,9 @@ static int iterate(struct ofat_ntfs *v, struct ofat_ntfs_file *dir, ofat_u32 *po
     for (;;) {
         blk = *pos >> 16; off = *pos & 0xFFFF;
         if (!blk) {
-            if ((rc = load_rec(v, dir->first, v->rec, &v->rec_no))) return rc == OFAT_NTFS_END ? OFAT_NTFS_EBAD : rc;
-            if (!(a = find_attr(v, v->rec, AT_IROOT, 1)) || !(val = res_value(a, &len)) || len < 32)
-                return OFAT_NTFS_EBAD;
+            if ((rc = ext_attr(v, dir->first, AT_IROOT, 1, 0, v->rec, &v->rec_no, &a)))
+                return rc == OFAT_NTFS_END ? OFAT_NTFS_EBAD : rc;
+            if (!(val = res_value(a, &len)) || len < 32) return OFAT_NTFS_EBAD;
             base = val + 16;
             if (rd32(base + 4) > len - 16) return OFAT_NTFS_EBAD;
         } else {
@@ -522,80 +649,191 @@ int ofat_ntfs_dir_next(struct ofat_ntfs *v, struct ofat_ntfs_file *dir, ofat_u32
     return rc;
 }
 
-static struct ofat_ntfs_ent other;
+/* ---- 8.3 names ---- */
 
-int ofat_ntfs_short(struct ofat_ntfs *v, struct ofat_ntfs_file *d, const struct ofat_ntfs_ent *ent, char fcb[11])
+/* Calls fn for each $FILE_NAME of record no (also those in other records
+   of its attribute list) until it returns 1; the value is in rec2. */
+typedef int (*fname_fn)(struct ofat_ntfs *, const ofat_u8 *val, ofat_u32 len, void *ctx);
+
+static int fnames_in(struct ofat_ntfs *v, fname_fn fn, void *ctx)
 {
-    char basis[11], tail[8];
-    ofat_u32 pos = 0, n = 1;
-    unsigned len, keep, t;
-    int r;
-    if (!ofat_cp_basis(v->cp, ent->name, ent->name_len, fcb)) return OFAT_NTFS_OK;
-    /* the 8.3 twin Windows made */
-    for (;;) {
-        r = iterate(v, d, &pos, &other, IT_DOS);
-        if (r == OFAT_NTFS_END) break;
-        if (r) return r;
-        if (other.ns == 2 && other.file.first == ent->file.first) {
-            ofat_cp_basis(v->cp, other.name, other.name_len, fcb);
-            return OFAT_NTFS_OK;
+    const ofat_u8 *a = v->rec2 + rd16(v->rec2 + 0x14), *end = v->rec2 + v->rec_size, *val;
+    ofat_u32 alen, len;
+    for (; a + 0x18 <= end && rd32(a) != AT_END; a += alen) {
+        alen = rd32(a + 4);
+        if (alen < 0x18 || alen > (ofat_u32)(end - a)) return OFAT_NTFS_EBAD;
+        if (rd32(a) == AT_FNAME && (val = res_value(a, &len)) && len >= 0x42 &&
+            0x42u + 2u * val[0x40] <= len && fn(v, val, len, ctx)) return 1;
+    }
+    return 0;
+}
+
+#define FN_EXT 8                                /* records of a list looked at */
+
+static int each_fname(struct ofat_ntfs *v, ofat_u32 no, fname_fn fn, void *ctx)
+{
+    const ofat_u8 *l, *val, *end;
+    ofat_u32 len, ext[FN_EXT], t;
+    unsigned n = 0, i;
+    int rc;
+    if ((rc = load_rec(v, no, v->rec2, &v->rec2_no))) return rc;
+    if ((rc = fnames_in(v, fn, ctx))) return rc;
+    if (!(l = find_attr(v, v->rec2, AT_LIST, 0))) return 0;
+    if (l[8]) {                                 /* non-resident: into idx */
+        ofat_lba lba;
+        if (rd32(l + 0x34) || (len = rd32(l + 0x30)) > OFAT_NTFS_MAXREC) return OFAT_NTFS_ESIZE;
+        v->idx_no = NONE;
+        for (i = 0; i * 512 < len; ++i) {
+            if ((rc = attr_sector(v, l, i, &lba))) return rc;
+            if (lba == NOBUF) return OFAT_NTFS_EBAD;
+            if (v->buf_lba == lba) v->buf_lba = NOBUF;
+            if (v->read(v->dev, v->start + lba, v->idx + i * 512)) return OFAT_NTFS_EIO;
         }
+        val = v->idx;
+    } else if (!(val = res_value(l, &len))) return OFAT_NTFS_EBAD;
+    for (l = val, end = val + len; l + 0x1A <= end && rd16(l + 4) >= 0x1A && l + rd16(l + 4) <= end; l += rd16(l + 4)) {
+        if (rd32(l) != AT_FNAME || (t = rd32(l + 0x10)) == no) continue;
+        for (i = 0; i < n && ext[i] != t; ++i) ;
+        if (i == n && n < FN_EXT) ext[n++] = t;
     }
-    /* else the n-th entry with this basis in the directory gets "~n" */
-    pos = 0;
-    while (pos < ent->pos) {
-        r = iterate(v, d, &pos, &other, 0);
-        if (r == OFAT_NTFS_END) break;
-        if (r) return r;
-        if (other.pos < ent->pos && ofat_cp_basis(v->cp, other.name, other.name_len, basis) &&
-            !memcmp(basis, fcb, 11)) ++n;
+    for (i = 0; i < n; ++i) {
+        if ((rc = load_rec(v, ext[i], v->rec2, &v->rec2_no))) return rc == OFAT_NTFS_END ? OFAT_NTFS_EBAD : rc;
+        if ((rc = fnames_in(v, fn, ctx))) return rc;
     }
-    t = sizeof(tail);
-    do { tail[--t] = (char)('0' + n % 10); n /= 10; } while (n);
+    return 0;
+}
+
+/* the 8.3 name of a long name without a DOS name: as much of its basis as
+   fits before "~" and the record number in base 36 (unique, and the
+   record number leads ofat_ntfs_lookup straight to the file) */
+static void gen_name(char fcb[11], ofat_u32 no)
+{
+    char tail[8];
+    unsigned t = sizeof(tail), len, keep;
+    do { tail[--t] = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ"[no % 36]; no /= 36; } while (no && t > 1);
     tail[--t] = '~';
     for (len = 8; len && fcb[len-1] == ' '; --len) ;
     keep = 8 - (sizeof(tail) - t);
     if (len > keep) len = keep;
     memcpy(fcb + len, tail + t, sizeof(tail) - t);
+    for (len += sizeof(tail) - t; len < 8; ++len) fcb[len] = ' ';
+}
+
+struct twin { ofat_u32 dir; char *fcb; };
+
+/* a DOS name (name space 2) of the file in the directory */
+static int find_twin(struct ofat_ntfs *v, const ofat_u8 *val, ofat_u32 len, void *ctx)
+{
+    struct twin *t = (struct twin *)ctx;
+    ofat_u16 name[12];
+    unsigned i, n = val[0x40];
+    (void)len;
+    if (val[0x41] != 2 || rd32(val) != t->dir || rd16(val + 4) || n > 12) return 0;
+    for (i = 0; i < n; ++i) name[i] = rd16(val + 0x42 + 2 * i);
+    ofat_cp_basis(v->cp, name, n, t->fcb);
+    return 1;
+}
+
+int ofat_ntfs_short(struct ofat_ntfs *v, struct ofat_ntfs_file *d, const struct ofat_ntfs_ent *ent, char fcb[11])
+{
+    struct twin t;
+    int rc;
+    if (!ofat_cp_basis(v->cp, ent->name, ent->name_len, fcb)) return OFAT_NTFS_OK;
+    t.dir = d->first; t.fcb = fcb;              /* the 8.3 twin Windows made */
+    if ((rc = each_fname(v, ent->file.first, find_twin, &t)) == 1) return OFAT_NTFS_OK;
+    if (rc && rc != OFAT_NTFS_END) return rc;
+    gen_name(fcb, ent->file.first);
     return OFAT_NTFS_OK;
+}
+
+struct gen { ofat_u32 dir, no; const char *fcb; struct ofat_ntfs_ent *ent; int twin, found; };
+
+/* a long name of the file in the directory whose made 8.3 name is fcb
+   (into ent); a DOS name there means the file has no made name */
+static int find_gen(struct ofat_ntfs *v, const ofat_u8 *val, ofat_u32 len, void *ctx)
+{
+    struct gen *g = (struct gen *)ctx;
+    ofat_u16 name[255];
+    char fcb[11];
+    unsigned i, n = val[0x40];
+    (void)len;
+    if (rd32(val) != g->dir || rd16(val + 4)) return 0;
+    if (val[0x41] == 2) { g->twin = 1; return 1; }
+    for (i = 0; i < n; ++i) name[i] = rd16(val + 0x42 + 2 * i);
+    if (g->found || !ofat_cp_basis(v->cp, name, n, fcb)) return 0;
+    gen_name(fcb, g->no);
+    if (memcmp(fcb, g->fcb, 11)) return 0;
+    g->found = 1;
+    g->ent->name_len = (ofat_u8)n;
+    g->ent->ns = val[0x41];
+    memcpy(g->ent->name, name, n * sizeof(name[0]));
+    g->ent->file.first = g->no;
+    return 0;
+}
+
+/* a long name of the file in the directory (for a DOS name found) */
+static int find_long(struct ofat_ntfs *v, const ofat_u8 *val, ofat_u32 len, void *ctx)
+{
+    struct gen *g = (struct gen *)ctx;
+    unsigned i;
+    (void)v; (void)len;
+    if (rd32(val) != g->dir || rd16(val + 4) || val[0x41] == 2) return 0;
+    g->ent->name_len = val[0x40];
+    g->ent->ns = val[0x41];
+    for (i = 0; i < g->ent->name_len; ++i) g->ent->name[i] = rd16(val + 0x42 + 2 * i);
+    return 1;
+}
+
+/* the record number of a made 8.3 name ("~" and base 36), or NONE */
+static ofat_u32 gen_no(const char fcb[11])
+{
+    ofat_u32 no = 0;
+    unsigned i = 8, digits = 0;
+    while (i && fcb[i-1] == ' ') --i;
+    while (i && fcb[i-1] != '~') {
+        --i;
+        if (!(fcb[i] >= '0' && fcb[i] <= '9') && !(fcb[i] >= 'A' && fcb[i] <= 'Z')) return NONE;
+        ++digits;
+    }
+    if (!i || !digits || digits > 6) return NONE;
+    for (; i < 8 && fcb[i] != ' '; ++i)
+        no = no * 36 + (ofat_u32)(fcb[i] <= '9' ? fcb[i] - '0' : fcb[i] - 'A' + 10);
+    return no;
 }
 
 int ofat_ntfs_lookup(struct ofat_ntfs *v, struct ofat_ntfs_file *d, const char fcb[11], struct ofat_ntfs_ent *ent)
 {
     char name[11];
-    ofat_u32 pos = 0, next, twin = NONE;
-    unsigned tilde;
-    int r, lossy;
-    for (tilde = 0; tilde < 8 && fcb[tilde] != '~'; ++tilde) ;
+    ofat_u32 pos = 0, no;
+    struct gen g;
+    int r;
+    g.dir = d->first; g.fcb = fcb; g.ent = ent; g.twin = g.found = 0;
+    /* a made name: its record, no search */
+    if ((no = gen_no(fcb)) != NONE && no >= 16) {
+        g.no = no;
+        r = each_fname(v, no, find_gen, &g);
+        if (r == OFAT_NTFS_EIO) return r;
+        if (r == 0 && g.found) goto found;
+        /* else a real 8.3 name with "~", or no such record */
+        g.found = g.twin = 0;
+    }
+    /* else the 8.3 names as they are, and the DOS names Windows made */
     for (;;) {
         r = iterate(v, d, &pos, ent, IT_DOS);
         if (r) return r;
-        lossy = ofat_cp_basis(v->cp, ent->name, ent->name_len, name);
-        if (ent->ns == 2) {                     /* a DOS name: its long name */
-            if (lossy || memcmp(name, fcb, 11)) continue;
-            twin = ent->file.first;
-            break;
-        }
-        if (!lossy) {
-            if (memcmp(name, fcb, 11)) continue;
-        } else {
-            if (tilde == 8) continue;           /* "~n" names have a "~" */
-            next = pos;
-            if ((r = ofat_ntfs_short(v, d, ent, name))) return r;
-            pos = next;
-            if (memcmp(name, fcb, 11)) continue;
+        if (ofat_cp_basis(v->cp, ent->name, ent->name_len, name) || memcmp(name, fcb, 11)) continue;
+        if (ent->ns == 2) {                     /* its long name */
+            g.no = ent->file.first;
+            if ((r = each_fname(v, g.no, find_long, &g)) < 0) return r == OFAT_NTFS_END ? OFAT_NTFS_EBAD : r;
+            if (!r) return OFAT_NTFS_EBAD;
+            ent->file.first = g.no;
         }
         break;
     }
-    if (twin != NONE) {
-        pos = 0;
-        do {
-            if ((r = iterate(v, d, &pos, ent, 0))) return r == OFAT_NTFS_END ? OFAT_NTFS_EBAD : r;
-        } while (ent->file.first != twin);
-    }
-    next = ent->pos;
-    r = stat_rec(v, ent->file.first, ent);
-    ent->pos = next;
+found:
+    no = ent->file.first;
+    r = stat_rec(v, no, ent);
+    ent->pos = 0;
     return r == OFAT_NTFS_END ? OFAT_NTFS_EBAD : r;
 }
 

@@ -297,54 +297,67 @@ int ofat_exfat_free(struct ofat_exfat *v, ofat_u32 *free_clusters)
     return OFAT_EXFAT_OK;
 }
 
-static struct ofat_exfat_ent other;
-
-int ofat_exfat_short(struct ofat_exfat *v, struct ofat_exfat_file *d, const struct ofat_exfat_ent *ent, char fcb[11])
+/* the 8.3 name of a changed long name: as much of its basis as fits
+   before "~" and the number of its entry in the directory (pos / 32) in
+   base 36: unique, and ofat_exfat_lookup goes straight to the entry */
+static void gen_name(char fcb[11], ofat_u32 no)
 {
-    char basis[11], tail[8];
-    ofat_u32 pos = 0, n = 1;
-    unsigned len, keep, t;
-    int r;
-    if (!ofat_cp_basis(v->cp, ent->name, ent->name_len, fcb)) return OFAT_EXFAT_OK;
-    /* the n-th entry with this basis in the directory gets "~n" */
-    while (pos < ent->pos) {
-        r = ofat_exfat_dir_next(v, d, &pos, &other);
-        if (r == OFAT_EXFAT_END) break;
-        if (r) return r;
-        if (other.pos < ent->pos && ofat_cp_basis(v->cp, other.name, other.name_len, basis) &&
-            !memcmp(basis, fcb, 11)) ++n;
-    }
-    t = sizeof(tail);
-    do { tail[--t] = (char)('0' + n % 10); n /= 10; } while (n);
+    char tail[8];
+    unsigned t = sizeof(tail), len, keep;
+    do { tail[--t] = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ"[no % 36]; no /= 36; } while (no && t > 1);
     tail[--t] = '~';
     for (len = 8; len && fcb[len-1] == ' '; --len) ;
     keep = 8 - (sizeof(tail) - t);
     if (len > keep) len = keep;
     memcpy(fcb + len, tail + t, sizeof(tail) - t);
+    for (len += sizeof(tail) - t; len < 8; ++len) fcb[len] = ' ';
+}
+
+int ofat_exfat_short(struct ofat_exfat *v, struct ofat_exfat_file *d, const struct ofat_exfat_ent *ent, char fcb[11])
+{
+    (void)d;
+    if (ofat_cp_basis(v->cp, ent->name, ent->name_len, fcb)) gen_name(fcb, ent->pos / 32);
     return OFAT_EXFAT_OK;
+}
+
+/* the entry number of a made 8.3 name ("~" and base 36), or all ones */
+static ofat_u32 gen_no(const char fcb[11])
+{
+    ofat_u32 no = 0;
+    unsigned i = 8, digits = 0;
+    while (i && fcb[i-1] == ' ') --i;
+    while (i && fcb[i-1] != '~') {
+        --i;
+        if (!(fcb[i] >= '0' && fcb[i] <= '9') && !(fcb[i] >= 'A' && fcb[i] <= 'Z')) return 0xFFFFFFFFUL;
+        ++digits;
+    }
+    if (!i || !digits || digits > 6) return 0xFFFFFFFFUL;
+    for (; i < 8 && fcb[i] != ' '; ++i)
+        no = no * 36 + (ofat_u32)(fcb[i] <= '9' ? fcb[i] - '0' : fcb[i] - 'A' + 10);
+    return no;
 }
 
 int ofat_exfat_lookup(struct ofat_exfat *v, struct ofat_exfat_file *d, const char fcb[11], struct ofat_exfat_ent *ent)
 {
     char name[11];
-    ofat_u32 pos = 0, next;
-    unsigned tilde;
+    ofat_u32 pos, no;
     int r;
-    for (tilde = 0; tilde < 8 && fcb[tilde] != '~'; ++tilde) ;
+    /* a made name: its entry, no search */
+    if ((no = gen_no(fcb)) != 0xFFFFFFFFUL && no < 0x08000000UL) {
+        pos = no * 32;
+        r = ofat_exfat_dir_next(v, d, &pos, ent);
+        if (r == OFAT_EXFAT_EIO) return r;
+        if (!r && ent->pos == no * 32 && ofat_cp_basis(v->cp, ent->name, ent->name_len, name)) {
+            gen_name(name, no);
+            if (!memcmp(name, fcb, 11)) return OFAT_EXFAT_OK;
+        }
+    }
+    /* else the names that are 8.3 names as they are */
+    pos = 0;
     for (;;) {
         r = ofat_exfat_dir_next(v, d, &pos, ent);
         if (r) return r;
-        if (!ofat_cp_basis(v->cp, ent->name, ent->name_len, name)) {
-            if (!memcmp(name, fcb, 11)) return OFAT_EXFAT_OK;
-            continue;
-        }
-        /* a changed name: only one with the same start and extension can be it */
-        if (tilde == 8 || memcmp(name, fcb, tilde) || memcmp(name + 8, fcb + 8, 3)) continue;
-        next = pos;
-        r = ofat_exfat_short(v, d, ent, name);
-        if (r) return r;
-        if (!memcmp(name, fcb, 11)) return OFAT_EXFAT_OK;
-        pos = next;
+        if (!ofat_cp_basis(v->cp, ent->name, ent->name_len, name) && !memcmp(name, fcb, 11)) return OFAT_EXFAT_OK;
     }
 }
 

@@ -50,8 +50,9 @@ struct ofat_ntfs {
     const struct ofat_cp *cp;
     ofat_s16 tz;                  /* minutes to add for the DOS times (NTFS
                                      has UTC): set after mount */
-    /* the runs of $MFT's data (the first OFAT_NTFS_MFTRUNS) */
-    ofat_u8 mft_nruns;
+    /* runs of $MFT's data: the first ones, then the last looked up (a
+       miss reads $MFT's runlist again) */
+    ofat_u8 mft_nruns, mft_next, mft_busy;
     struct ofat_ntfs_run mft[OFAT_NTFS_MFTRUNS];
     /* buffers of the caller: a sector (512 bytes) and three of
        OFAT_NTFS_MAXREC: MFT records (two: a directory and its entries)

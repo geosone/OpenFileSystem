@@ -20,7 +20,7 @@ TESTBINS := $(H)/test_exfat $(H)/test_exfat_write $(H)/test_exchk $(H)/test_exfm
 	$(H)/test_fatchk $(H)/test_defrag $(H)/test_fat_format $(H)/test_part $(H)/test_fat_write $(H)/test_exfat_big \
 	$(H)/ofimg $(H)/test_ntfs
 
-.PHONY: all test check dos-check clean
+.PHONY: ntfs-check all test check dos-check clean
 all: $(TESTBINS)
 
 # quick tests without images
@@ -40,6 +40,22 @@ check: all test dos-check
 	bash tests/exfat_big.sh
 	bash tests/ofimg_host.sh
 	bash tests/ntfs_host.sh
+
+# the longer NTFS tests: random trees through ntfs-3g in all cluster sizes
+# (SEEDS from FIRST), a fragmented $MFT, and FUZZ damaged MFT records and
+# index blocks under AddressSanitizer
+FIRST ?= 1
+SEEDS ?= 8
+FUZZ  ?= 2000
+ntfs-check: $(H)/test_ntfs $(H)/test_ntfs_asan
+	sh tests/ntfs_diff.sh $(FIRST) $(SEEDS)
+	sh tests/ntfs_mftfrag.sh
+	sh tests/ntfs_image.sh $(BUILD)/ntfs-fuzz 64 4096 >/dev/null
+	python3 -I tests/ntfs_fuzz.py $(BUILD)/ntfs-fuzz/ntfs.img $(H)/test_ntfs_asan $(FIRST) $(FUZZ) $(BUILD)/ntfs-fuzz
+
+$(H)/test_ntfs_asan: tests/ntfs_test.c src/ntfs/ntfs.c $(CPSRC) $(HDR)
+	@mkdir -p $(H)
+	$(CC) $(CPPFLAGS) -std=c90 -g -O1 -fsanitize=address,undefined -fno-omit-frame-pointer -o $@ $(filter %.c,$^)
 
 $(H)/test_exfat: tests/exfat_test.c $(EXFAT) $(HDR)
 $(H)/test_exfat_write: tests/exfat_write_test.c $(EXFAT) $(HDR)

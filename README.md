@@ -12,14 +12,14 @@ GonWare.
 | FAT | `src/fat/fat.c` | FAT12/16/32 with VFAT long names: mounting, directories, reading, writing, creating (8.3 names after the rules of Novell NSS's DOS name space: NT case bits, the upper case form, or `NAME~1`…`~4`, then `NAxxxx~1`, with a long name), removing, renaming and moving, attributes, times; dirty bit, FSInfo, every FAT copy |
 | Partitions | `src/part/part.c` | MBR with the EBR chain of logical partitions, GPT with CRC checks and the backup header, superfloppy detection |
 | Code pages | `src/codepage.c`, `src/latin.c`, `src/name83.c` | OEM code pages loaded from the `UNI_<cp>.TAB` files of [mars-unicode-tables](https://gitea.disconnected-by-peer.at/mars_nwe/mars-unicode-tables) (`ofat_cp_load`), DOS upper case, 8.3 basis names (shared by FAT and exFAT) |
-| exFAT | `src/exfat/exfat.c` | mounting, directories, reading, writing, creating, removing, renaming; TexFAT volumes (two FATs and bitmaps) are read through the active copy and both copies are changed alike |
+| exFAT | `src/exfat/exfat.c` | mounting, directories (8.3 names: the basis, else `~` and the entry number in base 36), reading, writing, creating, removing, renaming; TexFAT volumes (two FATs and bitmaps) are read through the active copy and both copies are changed alike |
 | exFAT format | `src/exfat/exfat_format.c`, `upcase.c` | layout, boot region, bitmap, up-case table, root directory; TexFAT, bad clusters |
 | exFAT check | `src/exfat/exfat_check.c` | checking and repairing |
 | FAT format | `src/fat/fat_format.c` | FAT12/16/32 layout, boot sector, FSInfo |
 | FAT check | `src/fat/fat_check.c` | checking and repairing FAT12/16/32 after the rules of fsck.fat |
 | FAT defrag | `src/fat/fat_defrag.c` | defragmenting FAT12/16/32, in a write order that survives power loss |
 | Image tool | `tools/ofimg.c` | host tool: formats an exFAT volume in a disk image (a partition or a superfloppy), makes directories and puts files, without mounting it (mtools knows no exFAT): `ofimg IMAGE START format SECTORS [LABEL] mkdir PATH put FILE PATH …` |
-| NTFS | `src/ntfs/ntfs.c` | read-only: MFT records, runlists (fragmented and sparse files), attribute lists, directory indexes, 8.3 names (the DOS names Windows gave, else `~n`), label, free space; not compressed or encrypted files; sectors of 512 bytes |
+| NTFS | `src/ntfs/ntfs.c` | read-only: MFT records, runlists (fragmented and sparse files), attribute lists, directory indexes, 8.3 names (the DOS names Windows gave, else `~` and the record number in base 36), label, free space; not compressed or encrypted files; sectors of 512 bytes |
 
 Sector numbers (`ofat_lba`) and file sizes (`ofat_fsize`) have 64 bits in
 32/64-bit builds: exFAT volumes past 2 TiB, files of 4 GiB and more, FAT and
@@ -41,6 +41,7 @@ make            # host test programs and ofimg in build/host
 make test       # quick tests
 make dos-check  # every source as a 16-bit DOS object (OpenWatcom, WATCOM=/opt/watcom)
 make check      # everything, including the image tests
+make ntfs-check # NTFS against ntfs-3g (random trees, all cluster sizes), fuzzing
 ```
 
 The image tests compare with what the Linux drivers read and write, and
@@ -52,7 +53,14 @@ root). The tests load the code pages from `UNITAB` (default
 the same repository.
 For NTFS they also need ntfsprogs (mkntfs, ntfsinfo, ntfsfix), ntfs-3g with
 FUSE, and setfattr.  ntfs-3g's layout.h is the reference for the NTFS
-structures.
+structures.  `make ntfs-check` fills volumes of every cluster size (512
+bytes to 64 KB) with a random tree through ntfs-3g (`tests/ntfs_gen.py`:
+deep and large directories, long names with umlauts, fragmented, sparse
+and compressed files, hard links, streams, deleted files) and compares
+names, sizes and CRC32 of every file (`SEEDS=n FIRST=n`; `KEEP=dir`
+keeps failing images), builds a volume whose $MFT is in many pieces, and
+reads damaged MFT records and index blocks under AddressSanitizer
+(`FUZZ=n` cases): the reader must give an error, never crash or hang.
 
 CMake (as a subproject) gives `OpenFAT::fat` (with NTFS reading) and `OpenFAT::check`.
 
