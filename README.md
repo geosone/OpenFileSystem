@@ -1,4 +1,4 @@
-# openfat
+# OpenFileSystem
 
 Portable FAT12, FAT16, FAT32 and exFAT code in C90, and reading NTFS. It builds with OpenWatcom
 for 16-bit DOS and with Clang or GCC for 32/64-bit hosts and kernels. The
@@ -62,7 +62,10 @@ keeps failing images), builds a volume whose $MFT is in many pieces, and
 reads damaged MFT records and index blocks under AddressSanitizer
 (`FUZZ=n` cases): the reader must give an error, never crash or hang.
 
-CMake (as a subproject) gives `OpenFAT::fat` (with NTFS reading) and `OpenFAT::check`.
+CMake (as a subproject) gives `OpenFileSystem::fat` (with NTFS reading) and
+`OpenFileSystem::check`; the old names `OpenFAT::fat` and `OpenFAT::check` still work.
+The repository was called openfat until it read more than FAT; the C
+interface keeps its names (`ofat_`, `include/openfat/`, `OPENFAT_`).
 
 ## History
 

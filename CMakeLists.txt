@@ -1,19 +1,20 @@
 # SPDX-License-Identifier: GPL-2.0-or-later
 #
-# CMake build of openfat for 32/64-bit hosts and kernels (GDOS). The host
+# CMake build of OpenFileSystem for 32/64-bit hosts and kernels (GDOS). The host
 # tests and the OpenWatcom check use the Makefile.
 #
-# OpenFAT::fat   reading and writing exFAT, formatting FAT12/16/32 and exFAT,
-#                reading NTFS
-#                (needs only string.h)
-# OpenFAT::check checking/repairing and defragmenting (also needs stdio.h
-#                for its messages)
+# OpenFileSystem::fat   reading and writing exFAT, formatting FAT12/16/32 and exFAT,
+#                       reading NTFS
+#                       (needs only string.h)
+# OpenFileSystem::check checking/repairing and defragmenting (also needs stdio.h
+#                       for its messages)
+# OpenFAT::fat and OpenFAT::check stay as the old names.
 # As a subproject the parent sets the compiler and flags.
 
 cmake_minimum_required(VERSION 3.20)
-project(openfat LANGUAGES C)
+project(OpenFileSystem LANGUAGES C)
 
-add_library(openfat_fat STATIC
+add_library(openfilesystem_fat STATIC
   src/exfat/exfat.c
   src/codepage.c
   src/latin.c
@@ -24,15 +25,17 @@ add_library(openfat_fat STATIC
   src/fat/fat_format.c
   src/part/part.c
   src/ntfs/ntfs.c)
-target_include_directories(openfat_fat PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/include")
-add_library(OpenFAT::fat ALIAS openfat_fat)
+target_include_directories(openfilesystem_fat PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/include")
+add_library(OpenFileSystem::fat ALIAS openfilesystem_fat)
+add_library(OpenFAT::fat ALIAS openfilesystem_fat)
 
-add_library(openfat_check STATIC
+add_library(openfilesystem_check STATIC
   src/exfat/exfat_check.c
   src/fat/fat_check.c
   src/fat/fat_defrag.c)
-target_link_libraries(openfat_check PUBLIC openfat_fat)
-add_library(OpenFAT::check ALIAS openfat_check)
+target_link_libraries(openfilesystem_check PUBLIC openfilesystem_fat)
+add_library(OpenFileSystem::check ALIAS openfilesystem_check)
+add_library(OpenFAT::check ALIAS openfilesystem_check)
 
-set_target_properties(openfat_fat openfat_check PROPERTIES
+set_target_properties(openfilesystem_fat openfilesystem_check PROPERTIES
   C_STANDARD 90 C_STANDARD_REQUIRED ON C_EXTENSIONS OFF)

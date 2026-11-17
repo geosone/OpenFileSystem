@@ -1,5 +1,5 @@
 /* ofimg: an exFAT volume in a disk image on the host, without mounting
-   it, through the openfat library (mtools does not know exFAT).  Builds
+   it, through the OpenFileSystem library (mtools does not know exFAT).  Builds
    images such as GonWare's installed C: drive.
 
    ofimg IMAGE START COMMAND... (several in a row)

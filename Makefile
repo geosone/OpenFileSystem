@@ -1,4 +1,4 @@
-# openfat: host test programs, host tests and the OpenWatcom check.
+# OpenFileSystem: host test programs, host tests and the OpenWatcom check.
 CC      ?= cc
 WATCOM  ?= /opt/watcom
 WCC     ?= $(WATCOM)/binl64/wcc
