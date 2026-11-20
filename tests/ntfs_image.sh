@@ -6,7 +6,7 @@
 # files (resident data), fragmented, sparse and larger files.  Then through
 # ntfs-3g (FUSE): a long name with a DOS name of its own (LANGDOS.TXT), a
 # file in so many pieces that its runs need an attribute list (viele.bin),
-# and compressed files in KOMPR (not read: OFAT_NTFS_ECOMP).  The files are
+# and compressed files (LZNT1) in KOMPR.  The files are
 # also kept in DIR/files for comparison.
 #   tests/ntfs_image.sh DIR [SIZE_MB [CLUSTER]]   -> DIR/ntfs.img
 set -eu
@@ -78,9 +78,14 @@ rm "$mnt"/LOCH/b*
 head -c $((600 * piece)) /dev/urandom > "$mnt/viele.bin"
 rm -r "$mnt/fill.bin" "$mnt/LOCH"
 cp "$mnt/viele.bin" "$files/viele.bin"
-mkdir "$mnt/KOMPR"
+mkdir "$mnt/KOMPR" "$files/KOMPR"
 setfattr -n system.ntfs_attrib_be -v 0x00000800 "$mnt/KOMPR"
-seq 1 20000 > "$mnt/KOMPR/zahlen.txt"
+# compressed units, units stored plain (random data), units of zeros
+# only (no clusters) and chunks stored within compressed units
+seq 1 20000 > "$files/KOMPR/zahlen.txt"
+head -c 70000 /dev/urandom > "$files/KOMPR/zufall.bin"
+{ seq 1 8000; head -c 6000 /dev/urandom; head -c 200000 /dev/zero; seq 5 7 30000; } > "$files/KOMPR/gemischt.bin"
+cp "$files/KOMPR/"* "$mnt/KOMPR/"
 fusermount -u "$mnt"
 trap - EXIT
 rmdir "$mnt"

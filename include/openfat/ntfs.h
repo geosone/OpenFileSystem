@@ -5,8 +5,9 @@
    ntfs-3g (include/ntfs-3g/layout.h) describes them.  Read-only: MFT
    records with their update sequence fixups, resident and non-resident
    attributes (runlists, sparse runs), attribute lists, the $I30
-   directory index ($INDEX_ROOT, $INDEX_ALLOCATION with its $BITMAP).
-   Compressed and encrypted files are not read (OFAT_NTFS_ECOMP).
+   directory index ($INDEX_ROOT, $INDEX_ALLOCATION with its $BITMAP),
+   compressed files (LZNT1, decompressed in idx 4 KB at a time).
+   Encrypted files are not read (OFAT_NTFS_ECOMP).
    Sectors of 512 bytes only.  The interface follows exfat.h, so the DOS
    redirector of EXFAT.SYS can serve NTFS too. */
 #include "openfat/codepage.h"
@@ -18,7 +19,7 @@
 #define OFAT_NTFS_EIO    -1       /* sector read failed */
 #define OFAT_NTFS_EBAD   -2       /* not NTFS or damaged */
 #define OFAT_NTFS_ESIZE  -3       /* sector, record or index size not supported */
-#define OFAT_NTFS_ECOMP  -6       /* compressed or encrypted data */
+#define OFAT_NTFS_ECOMP  -6       /* encrypted data (or compressed other than LZNT1) */
 
 /* attributes as DOS has them */
 #define OFAT_NTFS_RDONLY 0x01
@@ -69,7 +70,7 @@ struct ofat_ntfs_file {
     ofat_fsize size, valid;       /* data size, initialized size */
     ofat_u32 idx, clu;            /* run cache: first VCN, LCN */
     ofat_u32 rlen;                /* its length in clusters, 0: none */
-    ofat_u8 nofat;                /* resident data */
+    ofat_u8 nofat;                /* 1 resident data, 2 encrypted, 3 compressed */
     ofat_u8 big;                  /* narrow: 4 GB or larger, cut */
     ofat_u8 root;                 /* a directory */
 };

@@ -1,7 +1,7 @@
 #!/bin/sh
 # The NTFS reader on images of tests/ntfs_image.sh (clusters of 4 KB and
 # 512 bytes): every file read through 8.3 names equals the original, the
-# listing has every name, compressed files are refused.
+# listing has every name; compressed files too.
 set -eu
 cd "$(dirname "$0")/.."
 T=build/host/test_ntfs
@@ -36,6 +36,8 @@ for c in 4096 512; do
     check "$(short '' archiv.tar.gz)" archiv.tar.gz
     test "$(grep -c '  DATEI[0-9]*\.TXT ' "$d/list.txt")" = 150 || { echo "$c: VIELE incomplete"; exit 1; }
     grep -q '  ZAHLEN.TXT ' "$d/list.txt"
-    if "$T" "$d/ntfs.img" 0 'KOMPR\ZAHLEN.TXT' >/dev/null 2>&1; then echo "$c: compressed file read"; exit 1; fi
+    check 'KOMPR\ZAHLEN.TXT' KOMPR/zahlen.txt
+    check 'KOMPR\ZUFALL.BIN' KOMPR/zufall.bin
+    check 'KOMPR\GEMISCHT.BIN' KOMPR/gemischt.bin
     echo "NTFS reading with $c-byte clusters passed"
 done

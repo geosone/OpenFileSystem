@@ -6,7 +6,7 @@ dots, files from empty and resident to some MB, fragmented files (written in
 turns), sparse files, hard links, alternate data streams (user.* extended
 attributes of ntfs-3g), deleted files, and compressed files in KOMPR.
 Then prints the reference listing as tests/ntfs_test --dump does, read
-back through ntfs-3g: "D path", "F path size crc32", "C path".
+back through ntfs-3g: "D path", "F path size crc32".
     ntfs_gen.py MOUNT SEED CLUSTER
     ntfs_gen.py MOUNT --list        only the listing"""
 import os
@@ -22,7 +22,6 @@ CHARS = ('abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789'
          'äöüÄÖÜßéèñçå _-+,;=[]()!#$%&\'@^{}~.')
 EXTS = ['', '.txt', '.TXT', '.bin', '.dat', '.tar.gz', '.c', '.Html', '.longextension']
 used = {}          # directory -> lower case names in it (NTFS as Windows sees it)
-compressed = set()
 
 
 def name(d):
@@ -114,9 +113,9 @@ def generate():
         os.setxattr(kompr, 'system.ntfs_attrib_be', (0x800).to_bytes(4, 'big'))
     for _ in range(rnd.randint(1, 4) if cluster <= 4096 else 0):
         f = name(kompr)
-        with open(f, 'wb') as o:
-            o.write(b'compressible ' * rnd.randint(500, 5000))
-        compressed.add(f)
+        with open(f, 'wb') as o:                       # compressed, plain and zero units
+            o.write(b'compressible ' * rnd.randint(500, 5000) + rnd.randbytes(rnd.randint(0, 70000)) +
+                    bytes(rnd.randint(0, 200000)) + b'%d ' % rnd.randint(0, 9) * rnd.randint(0, 9000))
     os.sync()
 
 
@@ -126,8 +125,6 @@ def listing(d, rel):
         if e.is_dir(follow_symlinks=False):
             print('D', p)
             listing(e.path, p)
-        elif e.path in compressed:
-            print('C', p)
         else:
             c, n = 0, 0
             with open(e.path, 'rb') as f:

@@ -434,6 +434,130 @@ static int data_attr(struct ofat_ntfs *v, ofat_u32 no, ofat_u32 vcn, const ofat_
     return rc == OFAT_NTFS_END ? OFAT_NTFS_EBAD : rc;
 }
 
+/* ---- compressed files (LZNT1) ----
+   A compressed $DATA is cut into compression units (CU) of 16 clusters
+   (clusters of 4 KB at most).  A unit with all its clusters allocated is
+   stored plain, one without any is zeros, else its first clusters hold
+   the LZNT1 stream of the unit: chunks of 4096 bytes, each a 16-bit header
+   (bits 0-11: its size in bytes - 3, bit 15: compressed; 0: no more
+   chunks, the rest is zeros) and its data.  A chunk refers to itself only,
+   so one at a time is decompressed, into idx.  idx_dir is then the file's
+   record and idx_no the chunk; a file is never a directory, so load_idx
+   does not take it for an index block (and every other user of idx sets
+   idx_no to NONE). */
+
+#define CU_CLU   16
+#define CHUNK    4096
+
+struct cstream {
+    struct ofat_ntfs *v;
+    const ofat_u32 *lcn;                        /* the unit's clusters */
+    ofat_u32 pos, end;                          /* bytes in the stream */
+    const ofat_u8 *s;                           /* sector spos of it */
+    ofat_u32 spos;
+};
+
+/* the next byte of the stream; -1 at its end, -2 read error */
+static int cbyte(struct cstream *c)
+{
+    ofat_u32 sec;
+    ofat_lba lba;
+    if (c->pos >= c->end) return -1;
+    sec = c->pos >> 9;
+    if (!c->s || c->spos != sec) {
+        lba = ((ofat_lba)c->lcn[sec >> c->v->cshift] << c->v->cshift) + (sec & ((1UL << c->v->cshift) - 1));
+        if (!(c->s = sector(c->v, lba))) return -2;
+        c->spos = sec;
+    }
+    return c->s[(unsigned)(c->pos++ & 511)];
+}
+
+#define CBYTE(c, b) if (((b) = cbyte(c)) < 0) return (b) == -2 ? OFAT_NTFS_EIO : OFAT_NTFS_EBAD
+
+/* the chunk with header hdr that ends at cend into out (4096 bytes) */
+static int lznt1(struct cstream *c, ofat_u8 *out, unsigned hdr, ofat_u32 cend)
+{
+    unsigned dst = 0, tag, bit, tok, lg, i, pt, n;
+    int b, b2;
+    if (!(hdr & 0x8000)) {                      /* stored */
+        if ((hdr & 0xFFF) != CHUNK - 1) return OFAT_NTFS_EBAD;
+        for (; dst < CHUNK; ++dst) { CBYTE(c, b); out[dst] = (ofat_u8)b; }
+        return OFAT_NTFS_OK;
+    }
+    while (c->pos < cend && dst < CHUNK) {
+        CBYTE(c, b);
+        tag = (unsigned)b;
+        for (bit = 0; bit < 8 && c->pos < cend && dst < CHUNK; ++bit, tag >>= 1) {
+            if (!(tag & 1)) { CBYTE(c, b); out[dst++] = (ofat_u8)b; continue; }
+            CBYTE(c, b); CBYTE(c, b2);
+            tok = (unsigned)b | (unsigned)b2 << 8;
+            if (!dst) return OFAT_NTFS_EBAD;
+            /* the more is decompressed, the more bits the offset gets */
+            for (i = dst - 1, lg = 0; i >= 0x10; i >>= 1) ++lg;
+            pt = (tok >> (12 - lg)) + 1;
+            n = (tok & (0xFFFu >> lg)) + 3;
+            if (pt > dst) return OFAT_NTFS_EBAD;
+            for (; n && dst < CHUNK; --n, ++dst) out[dst] = out[dst - pt];
+        }
+    }
+    if (dst < CHUNK) memset(out + dst, 0, CHUNK - dst);
+    return OFAT_NTFS_OK;
+}
+
+/* chunk k (the bytes from k * 4096) of the compressed file f into idx */
+static int comp_chunk(struct ofat_ntfs *v, struct ofat_ntfs_file *f, ofat_u32 k)
+{
+    ofat_u32 lcn[CU_CLU], first, vcn, sec;
+    unsigned i, nalloc, per_cu = 2u << v->cshift, j;
+    struct ofat_ntfs_run r;
+    struct cstream c;
+    const ofat_u8 *a;
+    ofat_lba lba;
+    int rc, b, b2;
+    unsigned hdr;
+    ofat_u32 chunk = k;
+    if (v->idx_dir == f->first && v->idx_no == k) return OFAT_NTFS_OK;
+    first = k / per_cu * CU_CLU;
+    for (i = 0; i < CU_CLU; ++i) {
+        vcn = first + i;
+        if (!f->rlen || vcn < f->idx || vcn - f->idx >= f->rlen) {
+            if ((rc = data_attr(v, f->first, vcn, &a))) return rc;
+            if (!a[8]) return OFAT_NTFS_EBAD;
+            if ((rc = attr_run(a, vcn, &r))) return rc == OFAT_NTFS_END ? OFAT_NTFS_EBAD : rc;
+            f->idx = r.vcn; f->clu = r.lcn; f->rlen = r.len;
+        }
+        lcn[i] = f->clu == NONE ? NONE : f->clu + (vcn - f->idx);
+    }
+    for (nalloc = 0; nalloc < CU_CLU && lcn[nalloc] != NONE; ++nalloc) ;
+    for (i = nalloc; i < CU_CLU; ++i) if (lcn[i] != NONE) return OFAT_NTFS_EBAD;
+    v->idx_no = NONE;
+    k %= per_cu;                                /* the chunk in the unit */
+    if (nalloc == CU_CLU) {                     /* stored plain */
+        for (j = 0; j < CHUNK / 512; ++j) {
+            sec = k * (CHUNK / 512) + j;
+            lba = ((ofat_lba)lcn[sec >> v->cshift] << v->cshift) + (sec & ((1UL << v->cshift) - 1));
+            if (v->buf_lba == lba) v->buf_lba = NOBUF;
+            if (v->read(v->dev, v->start + lba, v->idx + j * 512)) return OFAT_NTFS_EIO;
+        }
+    } else {
+        c.v = v; c.lcn = lcn; c.pos = 0; c.end = (ofat_u32)nalloc << (v->cshift + 9); c.s = 0; c.spos = 0;
+        for (;;) {
+            if (!nalloc || c.pos + 2 > c.end) hdr = 0;
+            else { CBYTE(&c, b); CBYTE(&c, b2); hdr = (unsigned)b | (unsigned)b2 << 8; }
+            if (!hdr) { memset(v->idx, 0, CHUNK); break; }
+            if (c.pos + (hdr & 0xFFF) + 1 > c.end) return OFAT_NTFS_EBAD;
+            if (!k) {
+                if ((rc = lznt1(&c, v->idx, hdr, c.pos + (hdr & 0xFFF) + 1))) return rc;
+                break;
+            }
+            c.pos += (hdr & 0xFFF) + 1;
+            --k;
+        }
+    }
+    v->idx_dir = f->first; v->idx_no = chunk;
+    return OFAT_NTFS_OK;
+}
+
 int ofat_ntfs_read(struct ofat_ntfs *v, struct ofat_ntfs_file *f, ofat_fsize off, void OFAT_FAR *buf,
                    ofat_u16 len, ofat_u16 *done)
 {
@@ -448,7 +572,7 @@ int ofat_ntfs_read(struct ofat_ntfs *v, struct ofat_ntfs_file *f, ofat_fsize off
     if (f->nofat == 2) return OFAT_NTFS_ECOMP;
     if (off >= f->size) return OFAT_NTFS_OK;
     if (len > f->size - off) len = (ofat_u16)(f->size - off);
-    if (f->nofat) {                                 /* resident */
+    if (f->nofat == 1) {                            /* resident */
         if ((rc = data_attr(v, f->first, 0, &a))) return rc;
         if (!(val = res_value(a, &vlen)) || off + len > vlen) return OFAT_NTFS_EBAD;
         fmemcpy(out, val + (unsigned)off, len);
@@ -456,11 +580,15 @@ int ofat_ntfs_read(struct ofat_ntfs *v, struct ofat_ntfs_file *f, ofat_fsize off
         return OFAT_NTFS_OK;
     }
     while (len) {
-        in = (unsigned)off & 511;
-        n = 512 - in;
+        in = (unsigned)off & (f->nofat == 3 ? CHUNK - 1 : 511);
+        n = (f->nofat == 3 ? CHUNK : 512) - in;
         if (n > len) n = len;
         if (off >= f->valid) {
             fmemset(out, 0, n);
+        } else if (f->nofat == 3) {                 /* compressed */
+            if (f->valid - off < n) n = (unsigned)(f->valid - off);
+            if ((rc = comp_chunk(v, f, (ofat_u32)(off >> 12)))) return rc;
+            fmemcpy(out, v->idx + in, n);
         } else {
             if (f->valid - off < n) n = (unsigned)(f->valid - off);
             sec = (ofat_u32)(off >> 9);
@@ -517,7 +645,10 @@ static int stat_rec(struct ofat_ntfs *v, ofat_u32 no, struct ofat_ntfs_ent *e)
         return OFAT_NTFS_OK;
     }
     fl = rd16(a + 0x0C);
-    if (fl & 0x40FF) f->nofat = 2;              /* compressed, encrypted */
+    /* encrypted, or compressed other than LZNT1 in units of 16 clusters
+       of 4 KB at most: not read */
+    if (fl & 0x4000 || (fl & 0xFF && ((fl & 0xFF) != 1 || a[0x22] != 4 || v->cshift > 3))) f->nofat = 2;
+    else if (fl & 0xFF) f->nofat = 3;           /* compressed (LZNT1) */
     /* the size within the allocated size (holes of sparse files count) */
     if (rd32(a + 0x34) > rd32(a + 0x2C) || (rd32(a + 0x34) == rd32(a + 0x2C) && rd32(a + 0x30) > rd32(a + 0x28)))
         return OFAT_NTFS_EBAD;
