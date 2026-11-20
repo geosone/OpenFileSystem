@@ -94,6 +94,11 @@ void ofat_ntfs_rootdir(const struct ofat_ntfs *, struct ofat_ntfs_file *);
    *pos: block of the index (0 the root, n the n-th index block) << 16 |
    offset of the entry after it. */
 int ofat_ntfs_dir_next(struct ofat_ntfs *, struct ofat_ntfs_file *dir, ofat_u32 *pos, struct ofat_ntfs_ent *);
+/* The same entries without reading their MFT records: the name, the record
+   (file.first) and OFAT_NTFS_DIR only, quicker for a search by name;
+   ofat_ntfs_stat then adds attributes, times and size. */
+int ofat_ntfs_dir_name(struct ofat_ntfs *, struct ofat_ntfs_file *dir, ofat_u32 *pos, struct ofat_ntfs_ent *);
+int ofat_ntfs_stat(struct ofat_ntfs *, struct ofat_ntfs_ent *);
 int ofat_ntfs_read(struct ofat_ntfs *, struct ofat_ntfs_file *, ofat_fsize off, void OFAT_FAR *buf,
                    ofat_u16 len, ofat_u16 *done);
 int ofat_ntfs_free(struct ofat_ntfs *, ofat_u32 *free_clusters);

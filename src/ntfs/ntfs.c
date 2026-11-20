@@ -780,6 +780,17 @@ int ofat_ntfs_dir_next(struct ofat_ntfs *v, struct ofat_ntfs_file *dir, ofat_u32
     return rc;
 }
 
+int ofat_ntfs_dir_name(struct ofat_ntfs *v, struct ofat_ntfs_file *dir, ofat_u32 *pos, struct ofat_ntfs_ent *e)
+{
+    return iterate(v, dir, pos, e, 0);
+}
+
+int ofat_ntfs_stat(struct ofat_ntfs *v, struct ofat_ntfs_ent *e)
+{
+    int rc = stat_rec(v, e->file.first, e);
+    return rc == OFAT_NTFS_END ? OFAT_NTFS_EBAD : rc;
+}
+
 /* ---- 8.3 names ---- */
 
 /* Calls fn for each $FILE_NAME of record no (also those in other records
