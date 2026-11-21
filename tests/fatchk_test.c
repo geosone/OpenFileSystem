@@ -6,21 +6,21 @@
 #include <stdlib.h>
 #include <string.h>
 #include "testcp.h"
-#include "openfat/fat_check.h"
-#include "openfat/exfat.h"           /* the code page tables */
+#include "ofs/fat_check.h"
+#include "ofs/exfat.h"           /* the code page tables */
 
 static FILE *image;
 static unsigned char *bits;
 static unsigned ssize = 512;            /* from the boot sector */
 
-static int img_read(void *dev, ofat_u32 lba, void *buf)
+static int img_read(void *dev, ofs_u32 lba, void *buf)
 {
     (void)dev;
     if (fseek(image, (long)lba * ssize, SEEK_SET)) return -1;
     return fread(buf, ssize, 1, image) == 1 ? 0 : -1;
 }
 
-static int img_write(void *dev, ofat_u32 lba, const void *buf)
+static int img_write(void *dev, ofs_u32 lba, const void *buf)
 {
     (void)dev;
     if (fseek(image, (long)lba * ssize, SEEK_SET)) return -1;
@@ -30,11 +30,11 @@ static int img_write(void *dev, ofat_u32 lba, const void *buf)
 static void msg(void *ctx, int level, const char *text)
 {
     (void)ctx;
-    printf("%s%s\n", level == OFAT_FATCHK_ERROR ? "ERROR: " : level == OFAT_FATCHK_WARN ? "WARNING: " :
-           level == OFAT_FATCHK_FIXED ? "  FIXED: " : "", text);
+    printf("%s%s\n", level == OFS_FATCHK_ERROR ? "ERROR: " : level == OFS_FATCHK_WARN ? "WARNING: " :
+           level == OFS_FATCHK_FIXED ? "  FIXED: " : "", text);
 }
 
-static int mark(void *ctx, ofat_u32 bit)
+static int mark(void *ctx, ofs_u32 bit)
 {
     int old = bits[bit >> 3] >> (bit & 7) & 1;
     (void)ctx;
@@ -42,12 +42,12 @@ static int mark(void *ctx, ofat_u32 bit)
     return old;
 }
 
-static ofat_u32 window;
+static ofs_u32 window;
 static void clear(void *ctx) { (void)ctx; memset(bits, 0, window / 8 + 1); }
 
 int main(int argc, char **argv)
 {
-    struct ofat_fatchk c;
+    struct ofs_fatchk c;
     int r;
     int fix = argc > 4 && argv[4][0] == 'F';
     if (argc < 2) { fputs("fatchk_test IMAGE [LBA [WINDOW [F]]]\n", stderr); return 2; }
@@ -61,7 +61,7 @@ int main(int argc, char **argv)
         unsigned bps;
         if (fseek(image, (long)c.start * 512, SEEK_SET) || fread(b, 512, 1, image) != 1) return 2;
         bps = (unsigned)(b[11] | b[12] << 8);
-        if (bps >= 512 && bps <= OFAT_FATCHK_MAXSECT && !(bps & (bps - 1))) {
+        if (bps >= 512 && bps <= OFS_FATCHK_MAXSECT && !(bps & (bps - 1))) {
             ssize = bps;
             c.start = c.start * 512 / ssize;
         }
@@ -70,8 +70,8 @@ int main(int argc, char **argv)
     if (fix) c.write = img_write;
     c.window = window;
     bits = malloc(window / 8 + 1);
-    r = ofat_fatchk_run(&c);
-    if (r) { printf("not checked: %s\n", r == OFAT_FATCHK_EIO ? "read error" : "no FAT"); return 2; }
+    r = ofs_fatchk_run(&c);
+    if (r) { printf("not checked: %s\n", r == OFS_FATCHK_EIO ? "read error" : "no FAT"); return 2; }
     printf("FAT%u: %lu files, %lu directories; %lu clusters of %lu bytes, %lu used, %lu free\n", c.bits,
            (unsigned long)c.files, (unsigned long)c.dirs, (unsigned long)c.clusters,
            (unsigned long)c.cluster_size, (unsigned long)c.used, (unsigned long)c.free);

@@ -8,20 +8,20 @@
 #include <stdlib.h>
 #include <string.h>
 #include "testcp.h"
-#include "openfat/exfat.h"
+#include "ofs/exfat.h"
 
 static FILE *image;
 static unsigned long reads;
 
-static int img_read(void *dev, ofat_lba lba, void *buf)
+static int img_read(void *dev, ofs_lba lba, void *buf)
 {
     (void)dev; ++reads;
     if (fseek(image, (long)lba * 512, SEEK_SET)) return -1;
     return fread(buf, 512, 1, image) == 1 ? 0 : -1;
 }
 
-static struct ofat_exfat vol;
-static ofat_u8 sector_buf[OFAT_EXFAT_MAXSECT];
+static struct ofs_exfat vol;
+static ofs_u8 sector_buf[OFS_EXFAT_MAXSECT];
 
 static void name83(const char fcb[11], char *out)
 {
@@ -31,7 +31,7 @@ static void name83(const char fcb[11], char *out)
     out[n] = 0;
 }
 
-static void utf8(const ofat_u16 *s, unsigned n)
+static void utf8(const ofs_u16 *s, unsigned n)
 {
     unsigned i;
     for (i = 0; i < n; ++i) {
@@ -41,44 +41,44 @@ static void utf8(const ofat_u16 *s, unsigned n)
     }
 }
 
-static void list(struct ofat_exfat_file *dir, const char *path)
+static void list(struct ofs_exfat_file *dir, const char *path)
 {
-    static struct ofat_exfat_ent ent;
-    struct ofat_exfat_file sub;
-    ofat_u32 pos = 0, next;
+    static struct ofs_exfat_ent ent;
+    struct ofs_exfat_file sub;
+    ofs_u32 pos = 0, next;
     char fcb[11], name[13], subpath[260];
     int r;
     printf("%s\n", path);
-    while (!(r = ofat_exfat_dir_next(&vol, dir, &pos, &ent))) {
+    while (!(r = ofs_exfat_dir_next(&vol, dir, &pos, &ent))) {
         next = pos;
-        assert(!ofat_exfat_short(&vol, dir, &ent, fcb));
+        assert(!ofs_exfat_short(&vol, dir, &ent, fcb));
         name83(fcb, name);
         printf("  %-12s %02X %10lu%s %02u.%02u.%04u %02u:%02u  ", name, (unsigned)ent.attr,
                (unsigned long)ent.file.size, ent.file.big ? "+" : " ",
                ent.date & 31, ent.date >> 5 & 15, 1980 + (ent.date >> 9), ent.time >> 11, ent.time >> 5 & 63);
         utf8(ent.name, ent.name_len);
         putchar('\n');
-        if (ent.attr & OFAT_EXFAT_DIR) {
+        if (ent.attr & OFS_EXFAT_DIR) {
             sub = ent.file;
             sprintf(subpath, "%s%s\\", path, name);
             list(&sub, subpath);
             pos = next;
         }
     }
-    assert(r == OFAT_EXFAT_END);
+    assert(r == OFS_EXFAT_END);
 }
 
 static void cat(const char *path)
 {
-    static struct ofat_exfat_ent ent;
-    struct ofat_exfat_file dir;
+    static struct ofs_exfat_ent ent;
+    struct ofs_exfat_file dir;
     char fcb[11], part[13];
     static char buf[4096];
     const char *p = path, *e;
-    ofat_u32 off = 0;
-    ofat_u16 done;
+    ofs_u32 off = 0;
+    ofs_u16 done;
     unsigned i, n;
-    ofat_exfat_rootdir(&vol, &dir);
+    ofs_exfat_rootdir(&vol, &dir);
     for (;;) {
         e = strchr(p, '\\');
         n = e ? (unsigned)(e - p) : (unsigned)strlen(p);
@@ -87,13 +87,13 @@ static void cat(const char *path)
         e = strchr(part, '.');
         for (i = 0; part[i] && part + i != e && i < 8; ++i) fcb[i] = part[i];
         if (e) for (i = 0; e[1+i] && i < 3; ++i) fcb[8+i] = e[1+i];
-        if (ofat_exfat_lookup(&vol, &dir, fcb, &ent)) { fprintf(stderr, "not found: %s\n", part); exit(1); }
+        if (ofs_exfat_lookup(&vol, &dir, fcb, &ent)) { fprintf(stderr, "not found: %s\n", part); exit(1); }
         p += n;
         if (!*p) break;
         ++p; dir = ent.file;
     }
     do {
-        assert(!ofat_exfat_read(&vol, &ent.file, off, buf, sizeof(buf), &done));
+        assert(!ofs_exfat_read(&vol, &ent.file, off, buf, sizeof(buf), &done));
         fwrite(buf, 1, done, stdout);
         off += done;
     } while (done);
@@ -101,22 +101,22 @@ static void cat(const char *path)
 
 static void basis(const char *ascii, const char *want, int lossy)
 {
-    ofat_u16 name[64];
+    ofs_u16 name[64];
     char fcb[11];
     unsigned n;
-    for (n = 0; ascii[n]; ++n) name[n] = (ofat_u8)ascii[n];
-    assert(ofat_cp_basis(test_cp(850), name, n, fcb) == lossy);
+    for (n = 0; ascii[n]; ++n) name[n] = (ofs_u8)ascii[n];
+    assert(ofs_cp_basis(test_cp(850), name, n, fcb) == lossy);
     assert(!memcmp(fcb, want, 11));
 }
 
 int main(int argc, char **argv)
 {
-    static const ofat_u16 umlaut[] = { 0x00E4, 'r', 'g', 'e', 'r', '.', 't', 'x', 't' };
-    static const ofat_u16 euro[] = { 0x20AC, '.', 'T', 'X', 'T' };
-    ofat_u32 start = argc > 2 ? strtoul(argv[2], NULL, 0) : 0, free_clusters;
-    struct ofat_exfat_file root;
-    static const ofat_u16 agrave[] = { 0xC0, '.', 't', 'x', 't' };
-    struct ofat_cp bad;
+    static const ofs_u16 umlaut[] = { 0x00E4, 'r', 'g', 'e', 'r', '.', 't', 'x', 't' };
+    static const ofs_u16 euro[] = { 0x20AC, '.', 'T', 'X', 'T' };
+    ofs_u32 start = argc > 2 ? strtoul(argv[2], NULL, 0) : 0, free_clusters;
+    struct ofs_exfat_file root;
+    static const ofs_u16 agrave[] = { 0xC0, '.', 't', 'x', 't' };
+    struct ofs_cp bad;
     char fcb[11];
     int r;
     basis("README.TXT", "README  TXT", 0);
@@ -127,30 +127,30 @@ int main(int argc, char **argv)
     basis("a+b=c.txt", "A_B_C   TXT", 1);
     basis("NOEXT", "NOEXT      ", 0);
     basis("x.html", "X       HTM", 1);
-    assert(!ofat_cp_basis(test_cp(850), umlaut, 9, fcb) && !memcmp(fcb, "\x8ERGER   TXT", 11));
-    assert(!ofat_cp_basis(test_cp(437), umlaut, 9, fcb) && !memcmp(fcb, "\x8ERGER   TXT", 11));
-    assert(ofat_cp_basis(test_cp(850), euro, 5, fcb) && !memcmp(fcb, "_       TXT", 11));
+    assert(!ofs_cp_basis(test_cp(850), umlaut, 9, fcb) && !memcmp(fcb, "\x8ERGER   TXT", 11));
+    assert(!ofs_cp_basis(test_cp(437), umlaut, 9, fcb) && !memcmp(fcb, "\x8ERGER   TXT", 11));
+    assert(ofs_cp_basis(test_cp(850), euro, 5, fcb) && !memcmp(fcb, "_       TXT", 11));
     /* from UNI_437.TAB and UNI_850.TAB: DOS upper case, "a" with grave is
        "A" in 437 (no such capital) and B7h in 850; a capital that is not
        in the code page becomes its base letter (lossy) */
     assert(test_cp(437)->uni[0x85 - 0x80] == 0x00E0 && test_cp(437)->upper[0x85 - 0x80] == 'A');
     assert(test_cp(437)->upper[0x82 - 0x80] == 0x90 && test_cp(437)->upper[0x98 - 0x80] == 'Y');
     assert(test_cp(850)->upper[0x85 - 0x80] == 0xB7 && test_cp(850)->upper[0xE1 - 0x80] == 0xE1);
-    assert(ofat_cp_basis(test_cp(437), agrave, 5, fcb) && !memcmp(fcb, "A       TXT", 11));
-    assert(!ofat_cp_basis(test_cp(850), agrave, 5, fcb) && !memcmp(fcb, "\xB7       TXT", 11));
-    assert(ofat_cp_load(&bad, 437, (const ofat_u8 *)"short", 5) == -1);
+    assert(ofs_cp_basis(test_cp(437), agrave, 5, fcb) && !memcmp(fcb, "A       TXT", 11));
+    assert(!ofs_cp_basis(test_cp(850), agrave, 5, fcb) && !memcmp(fcb, "\xB7       TXT", 11));
+    assert(ofs_cp_load(&bad, 437, (const ofs_u8 *)"short", 5) == -1);
     if (argc < 2) { puts("exFAT name tests passed"); return 0; }
     image = fopen(argv[1], "rb");
     assert(image);
-    r = ofat_exfat_mount(&vol, img_read, NULL, start, test_cp(850), sector_buf);
+    r = ofs_exfat_mount(&vol, img_read, NULL, start, test_cp(850), sector_buf);
     if (r) { fprintf(stderr, "mount: %d\n", r); return 1; }
     if (argc > 3) { cat(argv[3]); return 0; }
-    assert(!ofat_exfat_free(&vol, &free_clusters));
+    assert(!ofs_exfat_free(&vol, &free_clusters));
     printf("label \""); utf8(vol.label, vol.label_len);
     printf("\" serial %04lX-%04lX, %lu of %lu clusters of %u bytes free\n",
            (unsigned long)(vol.serial >> 16), (unsigned long)(vol.serial & 0xFFFF),
            (unsigned long)free_clusters, (unsigned long)vol.clusters, 512u << vol.cshift);
-    ofat_exfat_rootdir(&vol, &root);
+    ofs_exfat_rootdir(&vol, &root);
     list(&root, "\\");
     fprintf(stderr, "%lu sector reads\n", reads);
     return 0;

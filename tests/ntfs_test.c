@@ -8,26 +8,26 @@
                                 compressed or encrypted data); checks that the
                                 8.3 names of a directory differ (but for hard
                                 links of one file) and that
-                                ofat_ntfs_lookup finds each entry by its own */
+                                ofs_ntfs_lookup finds each entry by its own */
 #include <assert.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include "openfat/ntfs.h"
+#include "ofs/ntfs.h"
 #include "testcp.h"
 
 static FILE *image;
 static unsigned long reads;
 
-static int img_read(void *dev, ofat_lba lba, void *buf)
+static int img_read(void *dev, ofs_lba lba, void *buf)
 {
     (void)dev; ++reads;
     if (fseek(image, (long)lba * 512, SEEK_SET)) return -1;
     return fread(buf, 512, 1, image) == 1 ? 0 : -1;
 }
 
-static struct ofat_ntfs vol;
-static ofat_u8 sector_buf[OFAT_NTFS_MAXREC * 3 + 512];
+static struct ofs_ntfs vol;
+static ofs_u8 sector_buf[OFS_NTFS_MAXREC * 3 + 512];
 
 static void name83(const char fcb[11], char *out)
 {
@@ -37,7 +37,7 @@ static void name83(const char fcb[11], char *out)
     out[n] = 0;
 }
 
-static void utf8(const ofat_u16 *s, unsigned n)
+static void utf8(const ofs_u16 *s, unsigned n)
 {
     unsigned i;
     for (i = 0; i < n; ++i) {
@@ -47,31 +47,31 @@ static void utf8(const ofat_u16 *s, unsigned n)
     }
 }
 
-static void list(struct ofat_ntfs_file *dir, const char *path)
+static void list(struct ofs_ntfs_file *dir, const char *path)
 {
-    static struct ofat_ntfs_ent ent;
-    struct ofat_ntfs_file sub;
-    ofat_u32 pos = 0, next;
+    static struct ofs_ntfs_ent ent;
+    struct ofs_ntfs_file sub;
+    ofs_u32 pos = 0, next;
     char fcb[11], name[13], subpath[260];
     int r;
     printf("%s\n", path);
-    while (!(r = ofat_ntfs_dir_next(&vol, dir, &pos, &ent))) {
+    while (!(r = ofs_ntfs_dir_next(&vol, dir, &pos, &ent))) {
         next = pos;
-        assert(!ofat_ntfs_short(&vol, dir, &ent, fcb));
+        assert(!ofs_ntfs_short(&vol, dir, &ent, fcb));
         name83(fcb, name);
         printf("  %-12s %02X %10lu%s %02u.%02u.%04u %02u:%02u  ", name, (unsigned)ent.attr,
                (unsigned long)ent.file.size, ent.file.big ? "+" : " ",
                ent.date & 31, ent.date >> 5 & 15, 1980 + (ent.date >> 9), ent.time >> 11, ent.time >> 5 & 63);
         utf8(ent.name, ent.name_len);
         putchar('\n');
-        if (ent.attr & OFAT_NTFS_DIR) {
+        if (ent.attr & OFS_NTFS_DIR) {
             sub = ent.file;
             sprintf(subpath, "%s%s\\", path, name);
             list(&sub, subpath);
             pos = next;
         }
     }
-    assert(r == OFAT_NTFS_END);
+    assert(r == OFS_NTFS_END);
 }
 
 static unsigned long crc_tab[256];
@@ -90,7 +90,7 @@ static unsigned long crc32(unsigned long c, const unsigned char *p, unsigned n)
     return c ^ 0xFFFFFFFFUL;
 }
 
-static void utf8s(const ofat_u16 *s, unsigned n, char *out)
+static void utf8s(const ofs_u16 *s, unsigned n, char *out)
 {
     unsigned i;
     for (i = 0; i < n; ++i) {
@@ -105,21 +105,21 @@ static int failed;
 
 static unsigned depth;
 
-static void dump(struct ofat_ntfs_file *dir, const char *path)
+static void dump(struct ofs_ntfs_file *dir, const char *path)
 {
-    static struct ofat_ntfs_ent ent, found;
+    static struct ofs_ntfs_ent ent, found;
     static unsigned char buf[4096];
-    struct ofat_ntfs_file sub;
-    ofat_u32 pos = 0, next;
+    struct ofs_ntfs_file sub;
+    ofs_u32 pos = 0, next;
     char fcb[11], (*seen)[11] = NULL, sub_path[4096], name[800];
-    ofat_u32 *seen_no = NULL;
+    ofs_u32 *seen_no = NULL;
     unsigned nseen = 0, cap = 0, i;
     int r;
-    while (!(r = ofat_ntfs_dir_next(&vol, dir, &pos, &ent))) {
+    while (!(r = ofs_ntfs_dir_next(&vol, dir, &pos, &ent))) {
         next = pos;
         utf8s(ent.name, ent.name_len, name);
         sprintf(sub_path, "%s/%s", path, name);
-        if (ofat_ntfs_short(&vol, dir, &ent, fcb)) { printf("! %s: no 8.3 name\n", sub_path); failed = 1; }
+        if (ofs_ntfs_short(&vol, dir, &ent, fcb)) { printf("! %s: no 8.3 name\n", sub_path); failed = 1; }
         for (i = 0; i < nseen; ++i)
             if (!memcmp(seen[i], fcb, 11) && seen_no[i] != ent.file.first) { printf("! %s: 8.3 name %.11s twice\n", sub_path, fcb); failed = 1; }
         if (nseen == cap) {
@@ -129,10 +129,10 @@ static void dump(struct ofat_ntfs_file *dir, const char *path)
         }
         seen_no[nseen] = ent.file.first;
         memcpy(seen[nseen++], fcb, 11);
-        if (!getenv("NTFS_NO_LOOKUP") && (ofat_ntfs_lookup(&vol, dir, fcb, &found) || found.file.first != ent.file.first)) {
+        if (!getenv("NTFS_NO_LOOKUP") && (ofs_ntfs_lookup(&vol, dir, fcb, &found) || found.file.first != ent.file.first)) {
             printf("! %s: lookup of %.11s fails\n", sub_path, fcb); failed = 1;
         }
-        if (ent.attr & OFAT_NTFS_DIR) {
+        if (ent.attr & OFS_NTFS_DIR) {
             printf("D %s\n", sub_path);
             sub = ent.file;
             if (depth == 64) { printf("! %s: deeper than 64 levels\n", sub_path); failed = 1; break; }
@@ -141,10 +141,10 @@ static void dump(struct ofat_ntfs_file *dir, const char *path)
             --depth;
         } else {
             unsigned long c = 0;
-            ofat_fsize off = 0;
-            ofat_u16 done;
+            ofs_fsize off = 0;
+            ofs_u16 done;
             do {
-                r = ofat_ntfs_read(&vol, &ent.file, off, buf, sizeof(buf), &done);
+                r = ofs_ntfs_read(&vol, &ent.file, off, buf, sizeof(buf), &done);
                 if (r) break;
                 c = crc32(c, buf, done);
                 off += done;
@@ -152,28 +152,28 @@ static void dump(struct ofat_ntfs_file *dir, const char *path)
             /* larger than any test file: a damaged size (fuzzing), the
                rest would be zeros */
             if (!r && done) { printf("! %s: larger than 256 MB\n", sub_path); failed = 1; }
-            else if (r == OFAT_NTFS_ECOMP) printf("C %s\n", sub_path);
+            else if (r == OFS_NTFS_ECOMP) printf("C %s\n", sub_path);
             else if (r) { printf("! %s: read error %d at %lu\n", sub_path, r, (unsigned long)off); failed = 1; }
             else printf("F %s %lu %08lx\n", sub_path, (unsigned long)off, c);
         }
         pos = next;
     }
-    if (r != OFAT_NTFS_END) { printf("! %s: directory error %d\n", path, r); failed = 1; }
+    if (r != OFS_NTFS_END) { printf("! %s: directory error %d\n", path, r); failed = 1; }
     free(seen); free(seen_no);
 }
 
 static void cat(const char *path)
 {
-    static struct ofat_ntfs_ent ent;
-    struct ofat_ntfs_file dir;
+    static struct ofs_ntfs_ent ent;
+    struct ofs_ntfs_file dir;
     char fcb[11], part[13];
     static char buf[4096];
     const char *p = path, *e;
-    ofat_u32 off = 0;
-    ofat_u16 done;
+    ofs_u32 off = 0;
+    ofs_u16 done;
     unsigned i, n;
     int r;
-    ofat_ntfs_rootdir(&vol, &dir);
+    ofs_ntfs_rootdir(&vol, &dir);
     for (;;) {
         e = strchr(p, '\\');
         n = e ? (unsigned)(e - p) : (unsigned)strlen(p);
@@ -182,13 +182,13 @@ static void cat(const char *path)
         e = strchr(part, '.');
         for (i = 0; part[i] && part + i != e && i < 8; ++i) fcb[i] = part[i];
         if (e) for (i = 0; e[1+i] && i < 3; ++i) fcb[8+i] = e[1+i];
-        if (ofat_ntfs_lookup(&vol, &dir, fcb, &ent)) { fprintf(stderr, "not found: %s\n", part); exit(1); }
+        if (ofs_ntfs_lookup(&vol, &dir, fcb, &ent)) { fprintf(stderr, "not found: %s\n", part); exit(1); }
         p += n;
         if (!*p) break;
         ++p; dir = ent.file;
     }
     do {
-        r = ofat_ntfs_read(&vol, &ent.file, off, buf, sizeof(buf), &done);
+        r = ofs_ntfs_read(&vol, &ent.file, off, buf, sizeof(buf), &done);
         if (r) { fprintf(stderr, "read: %d\n", r); exit(1); }
         fwrite(buf, 1, done, stdout);
         off += done;
@@ -197,26 +197,26 @@ static void cat(const char *path)
 
 int main(int argc, char **argv)
 {
-            ofat_u32 start = argc > 2 ? strtoul(argv[2], NULL, 0) : 0, free_clusters;
-    struct ofat_ntfs_file root;
+            ofs_u32 start = argc > 2 ? strtoul(argv[2], NULL, 0) : 0, free_clusters;
+    struct ofs_ntfs_file root;
     int r;
     if (argc < 2) { fprintf(stderr, "usage: ntfs_test IMAGE [LBA [PATH]]\n"); return 2; }
     image = fopen(argv[1], "rb");
     assert(image);
-    r = ofat_ntfs_mount(&vol, img_read, NULL, start, test_cp(850), sector_buf);
+    r = ofs_ntfs_mount(&vol, img_read, NULL, start, test_cp(850), sector_buf);
     if (r) { fprintf(stderr, "mount: %d\n", r); return 1; }
     if (argc > 3 && !strcmp(argv[3], "--dump")) {
-        ofat_ntfs_rootdir(&vol, &root);
+        ofs_ntfs_rootdir(&vol, &root);
         dump(&root, "");
         return failed;
     }
     if (argc > 3) { cat(argv[3]); return 0; }
-    assert(!ofat_ntfs_free(&vol, &free_clusters));
+    assert(!ofs_ntfs_free(&vol, &free_clusters));
     printf("label \""); utf8(vol.label, vol.label_len);
     printf("\" serial %04lX-%04lX, %lu of %lu clusters of %u bytes free%s\n",
            (unsigned long)(vol.serial >> 16), (unsigned long)(vol.serial & 0xFFFF),
            (unsigned long)free_clusters, (unsigned long)vol.clusters, 512u << vol.cshift, vol.dirty ? ", dirty" : "");
-    ofat_ntfs_rootdir(&vol, &root);
+    ofs_ntfs_rootdir(&vol, &root);
     list(&root, "\\");
     fprintf(stderr, "%lu sector reads\n", reads);
     return 0;

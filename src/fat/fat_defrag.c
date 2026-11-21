@@ -1,5 +1,5 @@
 /* FAT12/16/32 defragmentation (DEFRAG); the order of the writes is
-   described in include/openfat/fat_defrag.h.
+   described in include/ofs/fat_defrag.h.
    The files and directories are read into a list (16 bytes each: first
    cluster, clusters, the parent directory and the slot of the entry in
    it), the clusters in use into a bit map.  FILES: every fragmented file
@@ -12,7 +12,7 @@
 #include <stdio.h>
 #include <stdarg.h>
 #include <string.h>
-#include "openfat/fat_defrag.h"
+#include "ofs/fat_defrag.h"
 
 #ifdef __WATCOMC__
 #define FMEMSET  _fmemset
@@ -21,9 +21,9 @@
 #define FMEMSET  memset
 #define FMEMMOVE memmove
 #endif
-#define FAR OFAT_DEFRAG_FAR
+#define FAR OFS_DEFRAG_FAR
 
-#define MAXS     OFAT_DEFRAG_MAXSECT
+#define MAXS     OFS_DEFRAG_MAXSECT
 #define NOBUF    0xFFFFFFFFUL
 #define EOC      0xFFFFFFFFUL           /* normalized FAT values */
 #define BADCLU   0xFFFFFFF7UL
@@ -32,28 +32,28 @@
 #define F_DIR    1
 #define F_FRAG   2
 
-struct item { ofat_u32 first, count; ofat_u16 parent, slot; ofat_u8 flags, pad[3]; };
+struct item { ofs_u32 first, count; ofs_u16 parent, slot; ofs_u8 flags, pad[3]; };
 /* a FAT sector (lba from the start of the FAT), written to all FATs */
-struct fsec { ofat_u32 lba; int dirty; ofat_u8 b[MAXS]; };
+struct fsec { ofs_u32 lba; int dirty; ofs_u8 b[MAXS]; };
 /* a directory: the fixed FAT12/16 root, or a cluster chain */
-struct dir { ofat_u32 first, idx, clu; int fixed; };
+struct dir { ofs_u32 first, idx, clu; int fixed; };
 
-static struct ofat_defrag *D;
+static struct ofs_defrag *D;
 static struct fsec fc[2];
 static unsigned flast;                  /* fc[flast] was used last */
-static ofat_u32 dlba;
-static ofat_u8 dsec[MAXS];                /* a directory sector */
-static ofat_u8 boot[MAXS];
+static ofs_u32 dlba;
+static ofs_u8 dsec[MAXS];                /* a directory sector */
+static ofs_u8 boot[MAXS];
 static unsigned bits, nfats, active, ssize, sshift, cshift;
 static int mirror;
-static ofat_u32 fat0, fatlen, rootsec, rootsecs, heap, nclu, rootclu, head1, bmsize;
+static ofs_u32 fat0, fatlen, rootsec, rootsecs, heap, nclu, rootclu, head1, bmsize;
 static unsigned nitems;
 static char text[120];
 
-static ofat_u16 rd16(const ofat_u8 *p) { return (ofat_u16)(p[0] | p[1] << 8); }
-static ofat_u32 rd32(const ofat_u8 *p) { return rd16(p) | (ofat_u32)rd16(p+2) << 16; }
-static void wr16(ofat_u8 *p, ofat_u16 v) { p[0] = (ofat_u8)v; p[1] = (ofat_u8)(v >> 8); }
-static void wr32(ofat_u8 *p, ofat_u32 v) { wr16(p, (ofat_u16)v); wr16(p + 2, (ofat_u16)(v >> 16)); }
+static ofs_u16 rd16(const ofs_u8 *p) { return (ofs_u16)(p[0] | p[1] << 8); }
+static ofs_u32 rd32(const ofs_u8 *p) { return rd16(p) | (ofs_u32)rd16(p+2) << 16; }
+static void wr16(ofs_u8 *p, ofs_u16 v) { p[0] = (ofs_u8)v; p[1] = (ofs_u8)(v >> 8); }
+static void wr32(ofs_u8 *p, ofs_u32 v) { wr16(p, (ofs_u16)v); wr16(p + 2, (ofs_u16)(v >> 16)); }
 
 static void say(const char *fmt, ...)
 {
@@ -65,34 +65,34 @@ static void say(const char *fmt, ...)
     D->status(D->ctx, text);
 }
 
-static void show(ofat_u32 clu, ofat_u32 count, int state) { if (D->map && count) D->map(D->ctx, clu, count, state); }
+static void show(ofs_u32 clu, ofs_u32 count, int state) { if (D->map && count) D->map(D->ctx, clu, count, state); }
 static int stopped(void) { return D->stop && D->stop(D->ctx); }
 
 /* ---- work memory: the bit map, then the list ---- */
 
-static ofat_u8 FAR *at(ofat_u32 off) { return (ofat_u8 FAR *)D->mem(D->ctx, off); }
-static struct item FAR *item(unsigned i) { return (struct item FAR *)at(bmsize + (ofat_u32)i * 16); }
+static ofs_u8 FAR *at(ofs_u32 off) { return (ofs_u8 FAR *)D->mem(D->ctx, off); }
+static struct item FAR *item(unsigned i) { return (struct item FAR *)at(bmsize + (ofs_u32)i * 16); }
 
-static int used(ofat_u32 c) { return *at(c >> 3) >> (unsigned)(c & 7) & 1; }
+static int used(ofs_u32 c) { return *at(c >> 3) >> (unsigned)(c & 7) & 1; }
 
-int ofat_defrag_used(ofat_u32 clu) { return clu >= 2 && clu < nclu + 2 && used(clu); }
+int ofs_defrag_used(ofs_u32 clu) { return clu >= 2 && clu < nclu + 2 && used(clu); }
 
-static void set_used(ofat_u32 c, ofat_u32 n, int on)
+static void set_used(ofs_u32 c, ofs_u32 n, int on)
 {
-    ofat_u8 FAR *p;
+    ofs_u8 FAR *p;
     for (; n; --n, ++c) {
         p = at(c >> 3);
-        if (on) *p |= (ofat_u8)(1 << (unsigned)(c & 7));
-        else *p &= (ofat_u8)~(1 << (unsigned)(c & 7));
+        if (on) *p |= (ofs_u8)(1 << (unsigned)(c & 7));
+        else *p &= (ofs_u8)~(1 << (unsigned)(c & 7));
     }
 }
 
 /* the first cluster from c on (below end) whose bit is not state */
-static ofat_u32 skip(ofat_u32 c, ofat_u32 end, int state)
+static ofs_u32 skip(ofs_u32 c, ofs_u32 end, int state)
 {
-    ofat_u8 all = (ofat_u8)(state ? 0xFF : 0);
-    ofat_u8 FAR *p;
-    ofat_u32 left;
+    ofs_u8 all = (ofs_u8)(state ? 0xFF : 0);
+    ofs_u8 FAR *p;
+    ofs_u32 left;
     while (c < end) {
         if (!(c & 7) && end - c >= 8) {
             p = at(c >> 3);
@@ -109,9 +109,9 @@ static ofat_u32 skip(ofat_u32 c, ofat_u32 end, int state)
 }
 
 /* the lowest run of n free clusters from c on; 0: none */
-static ofat_u32 first_fit(ofat_u32 n, ofat_u32 c)
+static ofs_u32 first_fit(ofs_u32 n, ofs_u32 c)
 {
-    ofat_u32 end = nclu + 2, b;
+    ofs_u32 end = nclu + 2, b;
     for (;; c = b) {
         if ((c = skip(c, end, 1)) >= end) return 0;
         b = skip(c, end, 0);
@@ -120,9 +120,9 @@ static ofat_u32 first_fit(ofat_u32 n, ofat_u32 c)
 }
 
 /* n free clusters at the end of the highest free run from c on that holds them; 0: none */
-static ofat_u32 last_fit(ofat_u32 n, ofat_u32 c)
+static ofs_u32 last_fit(ofs_u32 n, ofs_u32 c)
 {
-    ofat_u32 end = nclu + 2, b, t = 0;
+    ofs_u32 end = nclu + 2, b, t = 0;
     for (;; c = b) {
         if ((c = skip(c, end, 1)) >= end) return t;
         b = skip(c, end, 0);
@@ -132,7 +132,7 @@ static ofat_u32 last_fit(ofat_u32 n, ofat_u32 c)
 
 /* the first position k of the sorted list (n entries) whose file starts at
    first or later */
-static unsigned pos_of(ofat_u32 first, unsigned n)
+static unsigned pos_of(ofs_u32 first, unsigned n)
 {
     unsigned lo = 0, mid;
     while (lo < n) {
@@ -143,7 +143,7 @@ static unsigned pos_of(ofat_u32 first, unsigned n)
 }
 
 /* the movable file that holds cluster c, NONE */
-static ofat_u16 owner(ofat_u32 c)
+static ofs_u16 owner(ofs_u32 c)
 {
     unsigned k = pos_of(c + 1, nitems);
     struct item FAR *it;
@@ -154,22 +154,22 @@ static ofat_u16 owner(ofat_u32 c)
 }
 
 /* file i starts at first now: its place in the sorted list */
-static void resort(ofat_u16 i, ofat_u32 first)
+static void resort(ofs_u16 i, ofs_u32 first)
 {
     unsigned k = pos_of(item(i)->first, nitems);
-    FMEMMOVE(D->order + k, D->order + k + 1, (nitems - k - 1) * sizeof(ofat_u16));
+    FMEMMOVE(D->order + k, D->order + k + 1, (nitems - k - 1) * sizeof(ofs_u16));
     item(i)->first = first;
     k = pos_of(first, nitems - 1);
-    FMEMMOVE(D->order + k + 1, D->order + k, (nitems - 1 - k) * sizeof(ofat_u16));
+    FMEMMOVE(D->order + k + 1, D->order + k, (nitems - 1 - k) * sizeof(ofs_u16));
     D->order[k] = i;
 }
 
 static void sort(void)
 {
     unsigned gap, i, j;
-    ofat_u16 v;
-    ofat_u32 f;
-    for (i = 0; i < nitems; ++i) D->order[i] = (ofat_u16)i;
+    ofs_u16 v;
+    ofs_u32 f;
+    for (i = 0; i < nitems; ++i) D->order[i] = (ofs_u16)i;
     for (gap = nitems / 2; gap; gap /= 2)
         for (i = gap; i < nitems; ++i) {
             v = D->order[i]; f = item(v)->first;
@@ -180,7 +180,7 @@ static void sort(void)
 
 /* ---- the FAT ---- */
 
-static int valid(ofat_u32 clu) { return clu >= 2 && clu < nclu + 2; }
+static int valid(ofs_u32 clu) { return clu >= 2 && clu < nclu + 2; }
 
 static int fat_out(struct fsec *f)
 {
@@ -195,9 +195,9 @@ static int fat_out(struct fsec *f)
 static int fat_flush(void) { return fat_out(&fc[0]) || fat_out(&fc[1]) ? -1 : 0; }
 
 /* the byte at off of the FAT; fc[flast] holds it */
-static ofat_u8 *fat_byte(ofat_u32 off)
+static ofs_u8 *fat_byte(ofs_u32 off)
 {
-    ofat_u32 s = off >> sshift;
+    ofs_u32 s = off >> sshift;
     struct fsec *f;
     if (fc[flast].lba != s) {
         flast = !flast;
@@ -212,16 +212,16 @@ static ofat_u8 *fat_byte(ofat_u32 off)
     return fc[flast].b + ((unsigned)off & (ssize - 1));
 }
 
-static int fat_get(ofat_u32 clu, ofat_u32 *v)
+static int fat_get(ofs_u32 clu, ofs_u32 *v)
 {
-    ofat_u8 *p;
-    ofat_u32 x;
+    ofs_u8 *p;
+    ofs_u32 x;
     unsigned b0;
     if (bits == 12) {
         if (!(p = fat_byte(clu + clu / 2))) return -1;
         b0 = *p;
         if (!(p = fat_byte(clu + clu / 2 + 1))) return -1;
-        x = b0 | (ofat_u32)*p << 8;
+        x = b0 | (ofs_u32)*p << 8;
         x = clu & 1 ? x >> 4 : x & 0xFFF;
         *v = x >= 0xFF8 ? EOC : x == 0xFF7 ? BADCLU : x;
     } else if (bits == 16) {
@@ -237,21 +237,21 @@ static int fat_get(ofat_u32 clu, ofat_u32 *v)
 }
 
 /* v: a cluster, 0 or EOC */
-static int fat_put(ofat_u32 clu, ofat_u32 v)
+static int fat_put(ofs_u32 clu, ofs_u32 v)
 {
-    ofat_u8 *p;
-    ofat_u32 off;
+    ofs_u8 *p;
+    ofs_u32 off;
     if (bits == 12) {
         v = v == EOC ? 0xFFF : v & 0xFFF;
         off = clu + clu / 2;
         if (!(p = fat_byte(off))) return -1;
-        *p = clu & 1 ? (ofat_u8)((*p & 0x0F) | (v << 4 & 0xF0)) : (ofat_u8)v;
+        *p = clu & 1 ? (ofs_u8)((*p & 0x0F) | (v << 4 & 0xF0)) : (ofs_u8)v;
         fc[flast].dirty = 1;
         if (!(p = fat_byte(off + 1))) return -1;
-        *p = clu & 1 ? (ofat_u8)(v >> 4) : (ofat_u8)((*p & 0xF0) | (v >> 8 & 0x0F));
+        *p = clu & 1 ? (ofs_u8)(v >> 4) : (ofs_u8)((*p & 0xF0) | (v >> 8 & 0x0F));
     } else if (bits == 16) {
         if (!(p = fat_byte(clu * 2))) return -1;
-        wr16(p, (ofat_u16)(v == EOC ? 0xFFFF : v));
+        wr16(p, (ofs_u16)(v == EOC ? 0xFFFF : v));
     } else {
         if (!(p = fat_byte(clu * 4))) return -1;
         wr32(p, (rd32(p) & 0xF0000000UL) | (v == EOC ? 0x0FFFFFFFUL : v));
@@ -263,24 +263,24 @@ static int fat_put(ofat_u32 clu, ofat_u32 v)
 /* FAT entry 1: the clean bit off while DEFRAG runs, as found after */
 static int set_head(int dirty)
 {
-    ofat_u8 *p;
+    ofs_u8 *p;
     if (bits == 12) return 0;
     if (!(p = fat_byte(bits / 8))) return -1;
-    if (bits == 16) wr16(p, (ofat_u16)(dirty ? head1 & ~0x8000UL : head1));
+    if (bits == 16) wr16(p, (ofs_u16)(dirty ? head1 & ~0x8000UL : head1));
     else wr32(p, (rd32(p) & 0xF0000000UL) | (dirty ? head1 & ~0x08000000UL : head1));
     fc[flast].dirty = 1;
     return fat_flush();
 }
 
 /* clusters of the chain at first and whether it is fragmented */
-static int chain(ofat_u32 first, ofat_u32 *count, int *frag)
+static int chain(ofs_u32 first, ofs_u32 *count, int *frag)
 {
-    ofat_u32 c = first, v, n = 0;
+    ofs_u32 c = first, v, n = 0;
     *frag = 0;
     for (;;) {
-        if (!valid(c) || n >= nclu) return OFAT_DEFRAG_EDIR;
+        if (!valid(c) || n >= nclu) return OFS_DEFRAG_EDIR;
         ++n;
-        if (fat_get(c, &v)) return OFAT_DEFRAG_EIO;
+        if (fat_get(c, &v)) return OFS_DEFRAG_EIO;
         if (v == EOC) break;
         if (v != c + 1) *frag = 1;
         c = v;
@@ -291,7 +291,7 @@ static int chain(ofat_u32 first, ofat_u32 *count, int *frag)
 
 /* ---- directories ---- */
 
-static void dir_of(struct dir *d, ofat_u16 parent)
+static void dir_of(struct dir *d, ofs_u16 parent)
 {
     memset(d, 0, sizeof(*d));
     if (parent != NONE) d->first = item(parent)->first;
@@ -300,9 +300,9 @@ static void dir_of(struct dir *d, ofat_u16 parent)
 }
 
 /* the sector of byte pos of a directory, NOBUF past its end */
-static ofat_u32 dir_lba(struct dir *d, ofat_u32 pos)
+static ofs_u32 dir_lba(struct dir *d, ofs_u32 pos)
 {
-    ofat_u32 idx = pos >> (sshift + cshift), next;
+    ofs_u32 idx = pos >> (sshift + cshift), next;
     if (d->fixed) return pos >> sshift < rootsecs ? rootsec + (pos >> sshift) : NOBUF;
     if (idx < d->idx || !d->clu) { d->idx = 0; d->clu = d->first; }
     while (d->idx < idx) {
@@ -313,7 +313,7 @@ static ofat_u32 dir_lba(struct dir *d, ofat_u32 pos)
     return heap + ((d->clu - 2) << cshift) + ((pos >> sshift) & ((1UL << cshift) - 1));
 }
 
-static ofat_u8 *dread(ofat_u32 lba)
+static ofs_u8 *dread(ofs_u32 lba)
 {
     if (dlba != lba) {
         dlba = NOBUF;
@@ -323,122 +323,122 @@ static ofat_u8 *dread(ofat_u32 lba)
     return dsec;
 }
 
-static ofat_u32 first_of(const ofat_u8 *e) { return rd16(e+26) | (bits == 32 ? (ofat_u32)rd16(e+20) << 16 : 0); }
+static ofs_u32 first_of(const ofs_u8 *e) { return rd16(e+26) | (bits == 32 ? (ofs_u32)rd16(e+20) << 16 : 0); }
 
-static void set_first(ofat_u8 FAR *e, ofat_u32 v)
+static void set_first(ofs_u8 FAR *e, ofs_u32 v)
 {
-    e[26] = (ofat_u8)v; e[27] = (ofat_u8)(v >> 8);
-    if (bits == 32) { e[20] = (ofat_u8)(v >> 16); e[21] = (ofat_u8)(v >> 24); }
+    e[26] = (ofs_u8)v; e[27] = (ofs_u8)(v >> 8);
+    if (bits == 32) { e[20] = (ofs_u8)(v >> 16); e[21] = (ofs_u8)(v >> 24); }
 }
 
-static int is_name(const ofat_u8 FAR *e, const char *name)
+static int is_name(const ofs_u8 FAR *e, const char *name)
 {
     unsigned i;
-    for (i = 0; i < 11 && e[i] == (ofat_u8)name[i]; ++i) ;
+    for (i = 0; i < 11 && e[i] == (ofs_u8)name[i]; ++i) ;
     return i == 11;
 }
 
 /* the files and subdirectories of a directory, then those of the subdirectories */
-static int walk(ofat_u16 parent, unsigned depth)
+static int walk(ofs_u16 parent, unsigned depth)
 {
     struct dir d;
     struct item FAR *it;
-    ofat_u32 pos, lba, first, count;
-    ofat_u8 *e;
+    ofs_u32 pos, lba, first, count;
+    ofs_u8 *e;
     unsigned from = nitems, to, i;
     int rc, frag, isdir;
-    if (depth > MAXDEPTH) return OFAT_DEFRAG_EDIR;
+    if (depth > MAXDEPTH) return OFS_DEFRAG_EDIR;
     dir_of(&d, parent);
     for (pos = 0; (lba = dir_lba(&d, pos)) != NOBUF; pos += 32) {
-        if (!(e = dread(lba))) return OFAT_DEFRAG_EIO;
+        if (!(e = dread(lba))) return OFS_DEFRAG_EIO;
         e += (unsigned)pos & (ssize - 1);
         if (!e[0]) break;
         if (e[0] == 0xE5 || e[11] == 0x0F || e[11] & 0x08 || e[0] == '.' || !(first = first_of(e))) continue;
         isdir = e[11] & 0x10;
-        if (pos >> 5 > 0xFFFFUL) return OFAT_DEFRAG_EDIR;
-        if (nitems >= D->maxitems || nitems >= NONE || bmsize + (nitems + 1UL) * 16 > D->memsize) return OFAT_DEFRAG_EMEM;
+        if (pos >> 5 > 0xFFFFUL) return OFS_DEFRAG_EDIR;
+        if (nitems >= D->maxitems || nitems >= NONE || bmsize + (nitems + 1UL) * 16 > D->memsize) return OFS_DEFRAG_EMEM;
         if ((rc = chain(first, &count, &frag)) != 0) return rc;
         it = item(nitems++);
-        it->first = first; it->count = count; it->parent = parent; it->slot = (ofat_u16)(pos >> 5);
-        it->flags = (ofat_u8)((isdir ? F_DIR : 0) | (frag ? F_FRAG : 0));
+        it->first = first; it->count = count; it->parent = parent; it->slot = (ofs_u16)(pos >> 5);
+        it->flags = (ofs_u8)((isdir ? F_DIR : 0) | (frag ? F_FRAG : 0));
         if (isdir) ++D->dirs; else ++D->files;
         if (frag) ++D->fragmented;
     }
     for (to = nitems, i = from; i < to; ++i)
-        if (item(i)->flags & F_DIR && (rc = walk((ofat_u16)i, depth + 1)) != 0) return rc;
+        if (item(i)->flags & F_DIR && (rc = walk((ofs_u16)i, depth + 1)) != 0) return rc;
     return 0;
 }
 
 /* ---- moving a file ---- */
 
-static int move(ofat_u16 i, ofat_u32 t)
+static int move(ofs_u16 i, ofs_u32 t)
 {
     struct item FAR *it = item(i), FAR *s;
     struct dir d;
-    ofat_u32 first = it->first, n = it->count, c, v, run, done, sectors, src, dst, k, lba;
+    ofs_u32 first = it->first, n = it->count, c, v, run, done, sectors, src, dst, k, lba;
     unsigned per = D->bufsize >> sshift, cnt;
-    ofat_u8 FAR *b = (ofat_u8 FAR *)D->buf;
-    ofat_u8 *e;
+    ofs_u8 FAR *b = (ofs_u8 FAR *)D->buf;
+    ofs_u8 *e;
     int isdir = it->flags & F_DIR;
     dlba = NOBUF;                       /* the old clusters may be written over */
     /* 1. the data, run by run of the old chain */
     for (c = first, done = 0; done < n; done += run, c = v) {
-        if (!valid(c)) return OFAT_DEFRAG_EDIR;
+        if (!valid(c)) return OFS_DEFRAG_EDIR;
         for (run = 1;; ++run) {
-            if (fat_get(c + run - 1, &v)) return OFAT_DEFRAG_EIO;
+            if (fat_get(c + run - 1, &v)) return OFS_DEFRAG_EIO;
             if (done + run >= n || v != c + run) break;
         }
         sectors = run << cshift;
         src = heap + ((c - 2) << cshift);
         dst = heap + ((t + done - 2) << cshift);
-        show(c, run, OFAT_DEFRAG_READ);
+        show(c, run, OFS_DEFRAG_READ);
         for (k = 0; k < sectors; k += cnt) {
             cnt = sectors - k > per ? per : (unsigned)(sectors - k);
-            if (D->read(D->dev, D->start + src + k, cnt, b)) return OFAT_DEFRAG_EIO;
+            if (D->read(D->dev, D->start + src + k, cnt, b)) return OFS_DEFRAG_EIO;
             if (isdir && !done && !k) {         /* the "." entry */
-                if (!is_name(b, ".          ")) return OFAT_DEFRAG_EDIR;
+                if (!is_name(b, ".          ")) return OFS_DEFRAG_EDIR;
                 set_first(b, t);
             }
-            if (D->write(D->dev, D->start + dst + k, cnt, b)) return OFAT_DEFRAG_EIO;
+            if (D->write(D->dev, D->start + dst + k, cnt, b)) return OFS_DEFRAG_EIO;
         }
-        show(t + done, run, OFAT_DEFRAG_WRITE);
+        show(t + done, run, OFS_DEFRAG_WRITE);
     }
     /* 2. the new chain, in all FATs */
     for (k = 0; k < n; ++k)
-        if (fat_put(t + k, k + 1 < n ? t + k + 1 : EOC)) return OFAT_DEFRAG_EIO;
-    if (fat_flush()) return OFAT_DEFRAG_EIO;
+        if (fat_put(t + k, k + 1 < n ? t + k + 1 : EOC)) return OFS_DEFRAG_EIO;
+    if (fat_flush()) return OFS_DEFRAG_EIO;
     set_used(t, n, 1);
     /* 3. the directory entry */
     dir_of(&d, it->parent);
-    if ((lba = dir_lba(&d, (ofat_u32)it->slot << 5)) == NOBUF) return OFAT_DEFRAG_EDIR;
-    if (!(e = dread(lba))) return OFAT_DEFRAG_EIO;
+    if ((lba = dir_lba(&d, (ofs_u32)it->slot << 5)) == NOBUF) return OFS_DEFRAG_EDIR;
+    if (!(e = dread(lba))) return OFS_DEFRAG_EIO;
     e += ((unsigned)it->slot << 5) & (ssize - 1);
-    if (first_of(e) != first) return OFAT_DEFRAG_EDIR;
+    if (first_of(e) != first) return OFS_DEFRAG_EDIR;
     set_first(e, t);
-    if (D->write(D->dev, D->start + lba, 1, dsec)) return OFAT_DEFRAG_EIO;
+    if (D->write(D->dev, D->start + lba, 1, dsec)) return OFS_DEFRAG_EIO;
     /* 4. the ".." entries of the subdirectories */
     if (isdir)
         for (k = 0; k < nitems; ++k) {
             s = item((unsigned)k);
             if (s->parent != i || !(s->flags & F_DIR)) continue;
             lba = heap + ((s->first - 2) << cshift);
-            if (!(e = dread(lba))) return OFAT_DEFRAG_EIO;
-            if (!is_name(e + 32, "..         ") || first_of(e + 32) != first) return OFAT_DEFRAG_EDIR;
+            if (!(e = dread(lba))) return OFS_DEFRAG_EIO;
+            if (!is_name(e + 32, "..         ") || first_of(e + 32) != first) return OFS_DEFRAG_EDIR;
             set_first(e + 32, t);
-            if (D->write(D->dev, D->start + lba, 1, dsec)) return OFAT_DEFRAG_EIO;
+            if (D->write(D->dev, D->start + lba, 1, dsec)) return OFS_DEFRAG_EIO;
         }
     /* 5. the old chain freed */
     for (c = first, run = 0, k = 0; k < n; ++k, c = v) {
-        if (fat_get(c, &v) || fat_put(c, 0)) return OFAT_DEFRAG_EIO;
+        if (fat_get(c, &v) || fat_put(c, 0)) return OFS_DEFRAG_EIO;
         set_used(c, 1, 0);
-        if (k + 1 == n || v != c + 1) { show(c + 1 - (run + 1), run + 1, OFAT_DEFRAG_FREE); run = 0; }
+        if (k + 1 == n || v != c + 1) { show(c + 1 - (run + 1), run + 1, OFS_DEFRAG_FREE); run = 0; }
         else ++run;
     }
-    if (fat_flush()) return OFAT_DEFRAG_EIO;
+    if (fat_flush()) return OFS_DEFRAG_EIO;
     resort(i, t);
-    it->flags &= (ofat_u8)~F_FRAG;
+    it->flags &= (ofs_u8)~F_FRAG;
     ++D->moves; D->moved += n;
-    show(t, n, OFAT_DEFRAG_USED);
+    show(t, n, OFS_DEFRAG_USED);
     return 0;
 }
 
@@ -448,15 +448,15 @@ static int unfragment(int to_end)
 {
     struct item FAR *it;
     unsigned i;
-    ofat_u32 t, left = D->fragmented;
+    ofs_u32 t, left = D->fragmented;
     int rc;
     for (i = 0; i < nitems; ++i) {
         it = item(i);
         if (!(it->flags & F_FRAG)) continue;
         say("Joining fragmented files: %lu left", (unsigned long)left--);
         if (!(t = to_end ? last_fit(it->count, 2) : first_fit(it->count, 2))) continue;
-        if (stopped()) return OFAT_DEFRAG_ESTOP;
-        if ((rc = move((ofat_u16)i, t)) != 0) return rc;
+        if (stopped()) return OFS_DEFRAG_ESTOP;
+        if ((rc = move((ofs_u16)i, t)) != 0) return rc;
     }
     return 0;
 }
@@ -464,9 +464,9 @@ static int unfragment(int to_end)
 static int full(void)
 {
     struct item FAR *it;
-    ofat_u32 p = 2, c, n, t;
+    ofs_u32 p = 2, c, n, t;
     unsigned pass, k, placed = 0;
-    ofat_u16 o;
+    ofs_u16 o;
     int rc;
     for (pass = 0; pass < 2; ++pass)    /* directories, then files */
         for (k = 0; k < nitems; ++k) {
@@ -479,8 +479,8 @@ static int full(void)
                 if (it->first == p && !(it->flags & F_FRAG)) { p += n; break; }
                 if (p + n > nclu + 2) return 0;
                 if ((c = skip(p, p + n, 0)) == p + n) {
-                    if (stopped()) return OFAT_DEFRAG_ESTOP;
-                    if ((rc = move((ofat_u16)k, p)) != 0) return rc;
+                    if (stopped()) return OFS_DEFRAG_ESTOP;
+                    if ((rc = move((ofs_u16)k, p)) != 0) return rc;
                     p += n;
                     break;
                 }
@@ -490,7 +490,7 @@ static int full(void)
                     say("Not enough free space to go on");
                     return 0;
                 }
-                if (stopped()) return OFAT_DEFRAG_ESTOP;
+                if (stopped()) return OFS_DEFRAG_ESTOP;
                 if ((rc = move(o, t)) != 0) return rc;
             }
         }
@@ -500,47 +500,47 @@ static int full(void)
 
 /* ---- boot sector ---- */
 
-static int is_pow2(ofat_u32 v) { return v && !(v & (v - 1)); }
+static int is_pow2(ofs_u32 v) { return v && !(v & (v - 1)); }
 
 static int read_boot(void)
 {
-    ofat_u32 total, bps;
-    if (D->read(D->dev, D->start, 1, boot)) return OFAT_DEFRAG_EIO;
+    ofs_u32 total, bps;
+    if (D->read(D->dev, D->start, 1, boot)) return OFS_DEFRAG_EIO;
     bps = rd16(boot+11);
     if (bps < 512 || bps > MAXS || !is_pow2(bps) || !is_pow2(boot[13]) || !rd16(boot+14) || !boot[16] ||
-        !(rd16(boot+19) || rd32(boot+32)) || !(rd16(boot+22) || rd32(boot+36))) return OFAT_DEFRAG_EBAD;
+        !(rd16(boot+19) || rd32(boot+32)) || !(rd16(boot+22) || rd32(boot+36))) return OFS_DEFRAG_EBAD;
     ssize = (unsigned)bps;
     for (sshift = 9; (1u << sshift) < ssize; ++sshift) ;
     for (cshift = 0; (1u << cshift) < boot[13]; ++cshift) ;
-    if (D->bufsize < ssize) return OFAT_DEFRAG_EMEM;
+    if (D->bufsize < ssize) return OFS_DEFRAG_EMEM;
     nfats = boot[16];
     fat0 = rd16(boot+14);
     fatlen = rd16(boot+22) ? rd16(boot+22) : rd32(boot+36);
-    rootsecs = ((ofat_u32)rd16(boot+17) * 32 + ssize - 1) >> sshift;
+    rootsecs = ((ofs_u32)rd16(boot+17) * 32 + ssize - 1) >> sshift;
     rootsec = fat0 + nfats * fatlen;
     heap = rootsec + rootsecs;
     total = rd16(boot+19) ? rd16(boot+19) : rd32(boot+32);
-    if (heap >= total) return OFAT_DEFRAG_EBAD;
+    if (heap >= total) return OFS_DEFRAG_EBAD;
     nclu = (total - heap) >> cshift;
     if (!rd16(boot+22)) bits = 32;
     else bits = nclu < 4085 ? 12 : nclu < 65525UL ? 16 : 0;
-    if (!bits) return OFAT_DEFRAG_EBAD;
+    if (!bits) return OFS_DEFRAG_EBAD;
     if (bits == 32 && nclu > 0x0FFFFFF5UL) nclu = 0x0FFFFFF5UL;
     mirror = 1; active = 0; rootclu = 0;
     if (bits == 32) {
         rootclu = rd32(boot+44);
         if (rd16(boot+40) & 0x80) { mirror = 0; active = rd16(boot+40) & 0x0F; }
-        if (active >= nfats || !valid(rootclu)) return OFAT_DEFRAG_EBAD;
-    } else if (!rootsecs) return OFAT_DEFRAG_EBAD;
-    D->bits = bits; D->clusters = nclu; D->cluster_size = (ofat_u32)ssize << cshift;
+        if (active >= nfats || !valid(rootclu)) return OFS_DEFRAG_EBAD;
+    } else if (!rootsecs) return OFS_DEFRAG_EBAD;
+    D->bits = bits; D->clusters = nclu; D->cluster_size = (ofs_u32)ssize << cshift;
     return 0;
 }
 
-int ofat_defrag_run(struct ofat_defrag *d)
+int ofs_defrag_run(struct ofs_defrag *d)
 {
     struct item FAR *it;
-    ofat_u32 c, v, off, len;
-    ofat_u8 *p;
+    ofs_u32 c, v, off, len;
+    ofs_u8 *p;
     unsigned i;
     int rc, rc2;
     D = d;
@@ -549,7 +549,7 @@ int ofat_defrag_run(struct ofat_defrag *d)
     dlba = NOBUF; nitems = 0;
     if ((rc = read_boot()) != 0) return rc;
     bmsize = ((nclu + 2 + 7) / 8 + 15) & ~15UL;
-    if (bmsize > d->memsize) return OFAT_DEFRAG_EMEM;
+    if (bmsize > d->memsize) return OFS_DEFRAG_EMEM;
     for (off = 0; off < bmsize; off += len) {
         len = d->block - (off & (d->block - 1));
         if (len > bmsize - off) len = bmsize - off;
@@ -557,24 +557,24 @@ int ofat_defrag_run(struct ofat_defrag *d)
     }
     say("Reading the FAT");
     for (c = 2; c < nclu + 2; ++c) {
-        if (fat_get(c, &v)) return OFAT_DEFRAG_EIO;
+        if (fat_get(c, &v)) return OFS_DEFRAG_EIO;
         if (v) { set_used(c, 1, 1); ++d->used; }
     }
     if (bits != 12) {
-        if (!(p = fat_byte(bits / 8))) return OFAT_DEFRAG_EIO;
+        if (!(p = fat_byte(bits / 8))) return OFS_DEFRAG_EIO;
         head1 = bits == 16 ? rd16(p) : rd32(p) & 0x0FFFFFFFUL;
     }
-    show(2, nclu, OFAT_DEFRAG_USED);
+    show(2, nclu, OFS_DEFRAG_USED);
     say("Reading the directories");
     if ((rc = walk(NONE, 0)) != 0) return rc;
     sort();
-    if (d->mode == OFAT_DEFRAG_ANALYZE) { d->fragmented_after = d->fragmented; return 0; }
-    if (set_head(1)) return OFAT_DEFRAG_EIO;
-    rc = unfragment(d->mode == OFAT_DEFRAG_FULL);
-    if (!rc && d->mode == OFAT_DEFRAG_FULL) rc = full();
+    if (d->mode == OFS_DEFRAG_ANALYZE) { d->fragmented_after = d->fragmented; return 0; }
+    if (set_head(1)) return OFS_DEFRAG_EIO;
+    rc = unfragment(d->mode == OFS_DEFRAG_FULL);
+    if (!rc && d->mode == OFS_DEFRAG_FULL) rc = full();
     rc2 = fat_flush();
-    if (rc == OFAT_DEFRAG_EIO || rc == OFAT_DEFRAG_EDIR || rc2) return rc ? rc : OFAT_DEFRAG_EIO;
-    if (set_head(0)) return OFAT_DEFRAG_EIO;
+    if (rc == OFS_DEFRAG_EIO || rc == OFS_DEFRAG_EDIR || rc2) return rc ? rc : OFS_DEFRAG_EIO;
+    if (set_head(0)) return OFS_DEFRAG_EIO;
     for (i = 0; i < nitems; ++i) {
         it = item(i);
         if (it->flags & F_FRAG) ++d->fragmented_after;

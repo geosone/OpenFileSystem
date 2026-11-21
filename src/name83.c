@@ -2,29 +2,29 @@
    the basis name after the rules of the FAT specification (Microsoft's
    "basis-name generation"), in the OEM code page. */
 #include <string.h>
-#include "openfat/codepage.h"
+#include "ofs/codepage.h"
 
 /* A Unicode character in the code page, upper case; 0 when it has none. */
-ofat_u8 ofat_cp_upper(const struct ofat_cp *cp, ofat_u16 u)
+ofs_u8 ofs_cp_upper(const struct ofs_cp *cp, ofs_u16 u)
 {
     unsigned i;
-    if (u < 0x80) return (ofat_u8)(u >= 'a' && u <= 'z' ? u - 32 : u);
+    if (u < 0x80) return (ofs_u8)(u >= 'a' && u <= 'z' ? u - 32 : u);
     for (i = 0; i < 128; ++i) if (cp->uni[i] == u) return cp->upper[i];
     return 0;
 }
 
-static int part83(const struct ofat_cp *cp, const ofat_u16 *name, unsigned len, char *out, unsigned max)
+static int part83(const struct ofs_cp *cp, const ofs_u16 *name, unsigned len, char *out, unsigned max)
 {
     unsigned i, n = 0;
     int lossy = 0;
-    ofat_u8 c;
+    ofs_u8 c;
     for (i = 0; i < len; ++i) {
-        c = ofat_cp_upper(cp, name[i]);
+        c = ofs_cp_upper(cp, name[i]);
         /* an accented Latin letter the code page lacks: its base letter
-           (ofat_latin_base has both cases, so no Unicode upper case and
+           (ofs_latin_base has both cases, so no Unicode upper case and
            its table: the same for every character, and DOS drivers stay
            small) */
-        if (!c && (c = ofat_latin_base(name[i])) != 0) lossy = 1;
+        if (!c && (c = ofs_latin_base(name[i])) != 0) lossy = 1;
         /* as NSS (and NT): spaces, dots and characters the code page
            lacks are left out, other invalid ones become "_" */
         if (!c || c == ' ' || c == '.') { lossy = 1; continue; }
@@ -35,7 +35,7 @@ static int part83(const struct ofat_cp *cp, const ofat_u16 *name, unsigned len, 
     return lossy;
 }
 
-int ofat_cp_basis(const struct ofat_cp *cp, const ofat_u16 *name, unsigned len, char fcb[11])
+int ofs_cp_basis(const struct ofs_cp *cp, const ofs_u16 *name, unsigned len, char fcb[11])
 {
     unsigned dot = len, lead = 0, i;
     int lossy;

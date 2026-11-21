@@ -6,7 +6,7 @@ BUILD   := build
 CFLAGS  ?= -std=c90 -Wall -Wextra -Werror -pedantic -O2
 CPPFLAGS += -Iinclude
 
-HDR      := $(wildcard include/openfat/*.h)
+HDR      := $(wildcard include/ofs/*.h)
 CPSRC    := src/codepage.c src/latin.c src/exfat/upcase.c src/name83.c
 FATSRC   := src/fat/fat.c $(CPSRC)
 EXFAT    := src/exfat/exfat.c $(CPSRC)
@@ -70,8 +70,8 @@ $(H)/test_fat_write: tests/fat_write_test.c $(FATSRC) $(HDR)
 $(H)/test_part: tests/part_test.c src/part/part.c $(HDR)
 # the host tool for images (tools/ofimg.c)
 $(H)/ofimg: tools/ofimg.c src/exfat/exfat_format.c $(EXFAT) $(HDR)
-$(H)/test_fat_write: CPPFLAGS += -DOFAT_FAT_MAXSECT=4096
-$(H)/test_exfat_big: CPPFLAGS += -DOFAT_EXFAT_MAXSECT=4096
+$(H)/test_fat_write: CPPFLAGS += -DOFS_FAT_MAXSECT=4096
+$(H)/test_exfat_big: CPPFLAGS += -DOFS_EXFAT_MAXSECT=4096
 # a host program with 64-bit printf (the library is checked as C90 elsewhere)
 $(H)/test_exfat_big: CFLAGS := $(subst -std=c90,-std=c99,$(CFLAGS))
 $(TESTBINS):

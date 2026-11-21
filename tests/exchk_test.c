@@ -6,19 +6,19 @@
 #include <stdlib.h>
 #include <string.h>
 #include "testcp.h"
-#include "openfat/exfat_check.h"
+#include "ofs/exfat_check.h"
 
 static FILE *image;
 static unsigned char *bits;
 
-static int img_read(void *dev, ofat_lba lba, void *buf)
+static int img_read(void *dev, ofs_lba lba, void *buf)
 {
     (void)dev;
     if (fseek(image, (long)lba * 512, SEEK_SET)) return -1;
     return fread(buf, 512, 1, image) == 1 ? 0 : -1;
 }
 
-static int img_write(void *dev, ofat_lba lba, const void *buf)
+static int img_write(void *dev, ofs_lba lba, const void *buf)
 {
     (void)dev;
     if (fseek(image, (long)lba * 512, SEEK_SET)) return -1;
@@ -28,11 +28,11 @@ static int img_write(void *dev, ofat_lba lba, const void *buf)
 static void msg(void *ctx, int level, const char *text)
 {
     (void)ctx;
-    printf("%s%s\n", level == OFAT_EXCHK_ERROR ? "ERROR: " : level == OFAT_EXCHK_WARN ? "WARNING: " :
-           level == OFAT_EXCHK_FIXED ? "  FIXED: " : "", text);
+    printf("%s%s\n", level == OFS_EXCHK_ERROR ? "ERROR: " : level == OFS_EXCHK_WARN ? "WARNING: " :
+           level == OFS_EXCHK_FIXED ? "  FIXED: " : "", text);
 }
 
-static int mark(void *ctx, ofat_u32 bit)
+static int mark(void *ctx, ofs_u32 bit)
 {
     int old = bits[bit >> 3] >> (bit & 7) & 1;
     (void)ctx;
@@ -40,12 +40,12 @@ static int mark(void *ctx, ofat_u32 bit)
     return old;
 }
 
-static ofat_u32 window;
+static ofs_u32 window;
 static void clear(void *ctx) { (void)ctx; memset(bits, 0, window / 8 + 1); }
 
 int main(int argc, char **argv)
 {
-    struct ofat_exchk c;
+    struct ofs_exchk c;
     int r;
     int fix = argc > 4 && argv[4][0] == 'F';
     if (argc < 2) { fputs("exchk_test IMAGE [LBA [WINDOW [F]]]\n", stderr); return 2; }
@@ -58,8 +58,8 @@ int main(int argc, char **argv)
     if (fix) c.write = img_write;
     c.window = window;
     bits = malloc(window / 8 + 1);
-    r = ofat_exchk_run(&c);
-    if (r) { printf("not checked: %s\n", r == OFAT_EXFAT_EIO ? "read error" : "no exFAT"); return 2; }
+    r = ofs_exchk_run(&c);
+    if (r) { printf("not checked: %s\n", r == OFS_EXFAT_EIO ? "read error" : "no exFAT"); return 2; }
     printf("%lu files, %lu directories; %lu clusters of %lu bytes, %lu used, %lu free\n",
            (unsigned long)c.files, (unsigned long)c.dirs, (unsigned long)c.clusters,
            (unsigned long)c.cluster_size, (unsigned long)c.used, (unsigned long)c.free);

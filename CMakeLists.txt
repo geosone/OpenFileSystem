@@ -8,7 +8,6 @@
 #                       (needs only string.h)
 # OpenFileSystem::check checking/repairing and defragmenting (also needs stdio.h
 #                       for its messages)
-# OpenFAT::fat and OpenFAT::check stay as the old names.
 # As a subproject the parent sets the compiler and flags.
 
 cmake_minimum_required(VERSION 3.20)
@@ -27,7 +26,6 @@ add_library(openfilesystem_fat STATIC
   src/ntfs/ntfs.c)
 target_include_directories(openfilesystem_fat PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/include")
 add_library(OpenFileSystem::fat ALIAS openfilesystem_fat)
-add_library(OpenFAT::fat ALIAS openfilesystem_fat)
 
 add_library(openfilesystem_check STATIC
   src/exfat/exfat_check.c
@@ -35,7 +33,6 @@ add_library(openfilesystem_check STATIC
   src/fat/fat_defrag.c)
 target_link_libraries(openfilesystem_check PUBLIC openfilesystem_fat)
 add_library(OpenFileSystem::check ALIAS openfilesystem_check)
-add_library(OpenFAT::check ALIAS openfilesystem_check)
 
 set_target_properties(openfilesystem_fat openfilesystem_check PROPERTIES
   C_STANDARD 90 C_STANDARD_REQUIRED ON C_EXTENSIONS OFF)
