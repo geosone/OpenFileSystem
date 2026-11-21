@@ -230,7 +230,9 @@ int main(int argc, char **argv)
     op_create("NEU.TXT", OFS_EXFAT_ARCH);
     op_write("NEU.TXT", 0, 100, 1);
     img_read(NULL, 0, boot);
-    assert(boot[106] & 2);                      /* VolumeDirty while changing */
+    /* VolumeDirty while changing; TexFAT: a transaction instead, the
+       active FAT untouched until ofs_exfat_clean */
+    assert(vol.tex ? !(boot[106] & 2) && vol.tx : (boot[106] & 2) != 0);
     op_write("NEU.TXT", 100, 3000, 1);
     op_write("NEU.TXT", 50, 20, 9);
     /* a large contiguous file, two files written in turns (FAT chains) */
@@ -305,9 +307,13 @@ int main(int argc, char **argv)
         op_remove("voll.bin");
     }
 
-    CHECK(ofs_exfat_clean(&vol));
-    img_read(NULL, 0, boot);
-    assert(!(boot[106] & 2));
+    {
+        unsigned active = boot[106] & 1;
+        CHECK(ofs_exfat_clean(&vol));
+        img_read(NULL, 0, boot);
+        assert(!(boot[106] & 2));
+        assert(!vol.tex || (boot[106] & 1) != active);   /* TexFAT: committed by ActiveFat */
+    }
     free0 = vol.free;                           /* the count kept on the way */
     CHECK(ofs_exfat_free(&vol, &free1));
     assert(free0 == free1);

@@ -195,6 +195,11 @@ core directly.
    UDF media are made by burning software ported to the hosts, not by the
    cores. Both share `src/dostime.c` (a calendar time with a zone as the
    host's DOS time).
+   **TexFAT transactions (2026-11-21)** in the exFAT core: working copies
+   (the inactive FAT and bitmap), copy-on-write of directory clusters
+   behind a padded first cluster, freed clusters not reused before the
+   commit, the commit by ActiveFat (excluded from the boot checksum, one
+   sector write), then the changed sectors to the new working copies.
 1. **Host interface and config**: add `ofs/host.h` and `ofs/config.h`.
    The existing `ofs_*_read_fn` callbacks are implemented on top of them;
    no call site changes. `hosts/posix` first: the tests and `ofimg` use it.

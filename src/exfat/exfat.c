@@ -77,6 +77,7 @@ static int walk(struct ofs_exfat *v, struct ofs_exfat_file *f, ofs_u32 idx, ofs_
 {
     ofs_u32 next;
     if (f->first < 2 || f->first >= v->clusters + 2) return OFS_EXFAT_EBAD;
+    if (f->gen != v->gen) { f->gen = v->gen; f->idx = 0; f->clu = 0; }   /* a cluster was copied */
     if (f->nofat) {
         if (idx >= v->clusters + 2 - f->first) return OFS_EXFAT_EBAD;
         *clu = f->first + idx;
@@ -132,6 +133,7 @@ int ofs_exfat_mount(struct ofs_exfat *v, ofs_exfat_read_fn read, void *dev, ofs_
     ofs_u32 pos;
     ofs_lba len;
     unsigned i, active;
+    ofs_u32 fat2 = 0, bitmap2 = 0, bmlen = 0;
     int r;
     memset(v, 0, sizeof(*v));
     v->read = read; v->dev = dev; v->start = start; v->cp = cp; v->buf = buf; v->buf_lba = NOBUF;
@@ -149,8 +151,9 @@ int ofs_exfat_mount(struct ofs_exfat *v, ofs_exfat_read_fn read, void *dev, ofs_
     if (b[110] != 1 && b[110] != 2) return OFS_EXFAT_EBAD;
     /* TexFAT: two FATs and bitmaps, ActiveFat names the ones in use */
     active = b[110] == 2 ? v->flags & 1 : 0;
-    if (b[110] == 2) v->fat2 = active ? v->fat : v->fat + rd32(b+84);
-    if (active) v->fat += rd32(b+84);
+    v->fat_len = rd32(b+84);
+    if (b[110] == 2) fat2 = active ? v->fat : v->fat + v->fat_len;
+    if (active) v->fat += v->fat_len;
     if (v->flags & 2) v->dirty = 2;     /* not ours to clear */
     if (v->fat < 24 || v->heap < v->fat || !v->clusters || v->clusters > 0xFFFFFFF5UL ||
         v->heap + ((ofs_lba)v->clusters << v->cshift) > len ||
@@ -164,8 +167,8 @@ int ofs_exfat_mount(struct ofs_exfat *v, ofs_exfat_read_fn read, void *dev, ofs_
         if (r) return r;
         if (!b[0]) break;
         if (b[0] == 0x81) {
-            if ((b[1] & 1) == active) v->bitmap = rd32(b+20);
-            else v->bitmap2 = rd32(b+20);
+            if ((b[1] & 1) == active) { v->bitmap = rd32(b+20); bmlen = rd32(b+24); }
+            else bitmap2 = rd32(b+20);
         }
         if (b[0] == 0x82) { v->upcase = rd32(b+20); v->upcase_len = rd32(b+24); }
         if (b[0] == 0x83) {
@@ -174,7 +177,12 @@ int ofs_exfat_mount(struct ofs_exfat *v, ofs_exfat_read_fn read, void *dev, ofs_
         }
     }
     if (v->bitmap < 2 || v->bitmap >= v->clusters + 2) return OFS_EXFAT_EBAD;
-    if (!v->fat2 || v->bitmap2 < 2 || v->bitmap2 >= v->clusters + 2) v->fat2 = v->bitmap2 = 0;
+    if (fat2 && bitmap2 >= 2 && bitmap2 < v->clusters + 2 && bmlen >= (v->clusters + 7) / 8) {
+        v->tex = 1;
+        v->fat_a = v->fat; v->fat_w = fat2;
+        v->bm_a = v->bitmap; v->bm_w = bitmap2;
+        v->bm_len = (v->clusters + 7) / 8;
+    }
     v->hint = 2;
     return OFS_EXFAT_OK;
 }
@@ -370,19 +378,123 @@ static int flush(struct ofs_exfat *v)
     return v->write(v->dev, v->start + v->buf_lba, v->buf) ? OFS_EXFAT_EWRITE : OFS_EXFAT_OK;
 }
 
-/* the cached sector also at lba: the TexFAT copy */
-static int mirror(struct ofs_exfat *v, ofs_lba lba)
+static int bad(int r) { return r == OFS_EXFAT_END ? OFS_EXFAT_EBAD : r; }
+
+/* ---- TexFAT: transactions ---- */
+
+#define CHG_BM 0x80000000UL
+
+/* a sector of the working FAT (off) or bitmap (CHG_BM | sector of it) changed */
+static void changed(struct ofs_exfat *v, ofs_u32 what)
 {
-    return v->write(v->dev, v->start + lba, v->buf) ? OFS_EXFAT_EWRITE : OFS_EXFAT_OK;
+    unsigned i;
+    if (v->chg_all) return;
+    for (i = 0; i < v->nchg; ++i)
+        if (v->chg[i] == what) return;
+    if (v->nchg == OFS_EXFAT_CHG) { v->chg_all = 1; return; }
+    v->chg[v->nchg++] = what;
 }
 
-static int bad(int r) { return r == OFS_EXFAT_END ? OFS_EXFAT_EBAD : r; }
+/* sector i of a bitmap (its first cluster) */
+static int bm_sector(struct ofs_exfat *v, ofs_u32 first, ofs_u32 i, ofs_lba *lba)
+{
+    struct ofs_exfat_file f;
+    memset(&f, 0, sizeof(f));
+    f.first = first;
+    f.gen = v->gen;
+    return bad(file_sector(v, &f, (ofs_fsize)i << v->sshift, lba));
+}
+
+/* one sector of the FATs or bitmaps from the copy of fat/bm `from` to `to` */
+static int copy_sector(struct ofs_exfat *v, ofs_u32 what, ofs_u32 from_fat, ofs_u32 to_fat,
+                       ofs_u32 from_bm, ofs_u32 to_bm)
+{
+    ofs_lba a, b;
+    int r;
+    if (what & CHG_BM) {
+        if ((r = bm_sector(v, from_bm, what & ~CHG_BM, &a)) != 0) return r;
+        if ((r = bm_sector(v, to_bm, what & ~CHG_BM, &b)) != 0) return r;
+    } else {
+        a = from_fat + what;
+        b = to_fat + what;
+    }
+    if (!sector(v, a)) return OFS_EXFAT_EIO;
+    return v->write(v->dev, v->start + b, v->buf) ? OFS_EXFAT_EWRITE : OFS_EXFAT_OK;
+}
+
+/* the whole FAT and bitmap from the active copies to the working ones */
+static int copy_all(struct ofs_exfat *v)
+{
+    ofs_u32 i, n = (v->bm_len + (1UL << v->sshift) - 1) >> v->sshift;
+    int r;
+    for (i = 0; i < v->fat_len; ++i)
+        if ((r = copy_sector(v, i, v->fat_a, v->fat_w, 0, 0)) != 0) return r;
+    for (i = 0; i < n; ++i)
+        if ((r = copy_sector(v, CHG_BM | i, 0, 0, v->bm_a, v->bm_w)) != 0) return r;
+    return OFS_EXFAT_OK;
+}
+
+/* 1 when cluster clu is in use in the active bitmap (the committed state) */
+static int used_active(struct ofs_exfat *v, ofs_u32 clu, int *used)
+{
+    ofs_u32 bit = clu - 2;
+    ofs_lba lba;
+    const ofs_u8 *s;
+    int r;
+    if ((r = bm_sector(v, v->bm_a, (bit >> 3) >> v->sshift, &lba)) != 0) return r;
+    if (!(s = sector(v, lba))) return OFS_EXFAT_EIO;
+    *used = s[(unsigned)(bit >> 3) & ((1u << v->sshift) - 1)] >> (bit & 7) & 1;
+    return OFS_EXFAT_OK;
+}
+
+/* cluster clu as TexFAT padding (entries A1h): all of it (a new
+   directory), or with only_end its end entries (00h; they come last, so a
+   cluster whose last entry is not 00h has none) */
+static int pad_cluster(struct ofs_exfat *v, ofs_u32 clu, int only_end)
+{
+    ofs_lba lba = v->heap + ((ofs_lba)(clu - 2) << v->cshift);
+    ofs_u32 k;
+    unsigned i, ss = 1u << v->sshift;
+    if (only_end) {
+        const ofs_u8 *e = sector(v, lba + (1UL << v->cshift) - 1);
+        if (!e) return OFS_EXFAT_EIO;
+        if (e[ss - 32]) return OFS_EXFAT_OK;
+    }
+    for (k = 0; k < 1UL << v->cshift; ++k) {
+        int change = 0;
+        if (only_end) {
+            if (!sector(v, lba + k)) return OFS_EXFAT_EIO;
+        } else {
+            memset(v->buf, 0, ss);
+            v->buf_lba = lba + k;
+        }
+        for (i = 0; i < ss; i += 32)
+            if (!v->buf[i]) { v->buf[i] = 0xA1; change = 1; }
+        if (change && flush(v)) return OFS_EXFAT_EWRITE;
+    }
+    return OFS_EXFAT_OK;
+}
 
 /* VolumeDirty before the first change */
 static int begin(struct ofs_exfat *v)
 {
     ofs_u8 *s;
+    int r;
     if (!v->write) return OFS_EXFAT_EWRITE;
+    if (v->tex) {
+        /* TexFAT: the working copies from the active ones once, the end
+           of the root's first cluster as padding (new entries go after it) */
+        if (!v->synced) {
+            if ((r = copy_all(v)) != 0) return r;
+            v->synced = 1;
+            v->fat = v->fat_w;
+            v->bitmap = v->bm_w;
+            v->nchg = v->chg_all = 0;
+            if ((r = pad_cluster(v, v->root, 1)) != 0) return r;
+        }
+        v->tx = 1;
+        return OFS_EXFAT_OK;
+    }
     if (v->dirty) return OFS_EXFAT_OK;
     if (!(s = (ofs_u8 *)sector(v, 0))) return OFS_EXFAT_EIO;
     s[106] |= 2;
@@ -390,10 +502,47 @@ static int begin(struct ofs_exfat *v)
     return flush(v);
 }
 
+/* TexFAT: the transaction committed -- ActiveFat flips, then the new
+   working copies get what changed */
+static int commit(struct ofs_exfat *v)
+{
+    ofs_u32 t, used;
+    ofs_u8 *s;
+    unsigned i;
+    int r;
+    if (!v->tx) return OFS_EXFAT_OK;
+    if (!(s = (ofs_u8 *)sector(v, 0))) return OFS_EXFAT_EIO;
+    v->flags = (ofs_u16)(rd16(s+106) ^ 1);
+    wr16(s+106, v->flags);
+    if (v->free != NOCOUNT) {
+        used = v->clusters - v->free;
+        s[112] = (ofs_u8)(v->clusters > 0x1000000UL ? (used >> 8) * 100 / (v->clusters >> 8)
+                                                   : used * 100 / v->clusters);
+    }
+    if ((r = flush(v)) != 0) return r;          /* the commit */
+    t = v->fat_a; v->fat_a = v->fat_w; v->fat_w = t;
+    t = v->bm_a; v->bm_a = v->bm_w; v->bm_w = t;
+    v->tx = 0;
+    v->synced = 0;                              /* until the copies are done */
+    if (v->chg_all) r = copy_all(v);
+    else
+        for (r = 0, i = 0; i < v->nchg && !r; ++i)
+            r = copy_sector(v, v->chg[i], v->fat_a, v->fat_w, v->bm_a, v->bm_w);
+    v->fat = v->fat_a;
+    v->bitmap = v->bm_a;
+    if (r) return r;
+    v->fat = v->fat_w;
+    v->bitmap = v->bm_w;
+    v->synced = 1;
+    v->nchg = v->chg_all = 0;
+    return OFS_EXFAT_OK;
+}
+
 int ofs_exfat_clean(struct ofs_exfat *v)
 {
     ofs_u32 used;
     ofs_u8 *s;
+    if (v->tex) return v->write ? commit(v) : OFS_EXFAT_OK;
     if (v->dirty != 1) return OFS_EXFAT_OK;
     if (!(s = (ofs_u8 *)sector(v, 0))) return OFS_EXFAT_EIO;
     s[106] &= ~2;
@@ -419,15 +568,15 @@ static int bitmap_lba(struct ofs_exfat *v, ofs_u32 first, ofs_u32 bit, ofs_lba *
 static int set_bit(struct ofs_exfat *v, ofs_u32 clu, int on)
 {
     ofs_u32 bit = clu - 2;
-    ofs_lba lba, lba2 = 0;
+    ofs_lba lba;
     ofs_u8 *s, m = (ofs_u8)(1 << (bit & 7));
     unsigned at = (unsigned)(bit >> 3) & ((1u << v->sshift) - 1);
     int r;
-    if (v->bitmap2 && (r = bitmap_lba(v, v->bitmap2, bit, &lba2)) != 0) return r;
     if ((r = bitmap_lba(v, v->bitmap, bit, &lba)) != 0) return r;
     if (!(s = (ofs_u8 *)sector(v, lba))) return OFS_EXFAT_EIO;
     if (on) s[at] |= m; else s[at] &= (ofs_u8)~m;
-    if ((r = flush(v)) != 0 || (lba2 && (r = mirror(v, lba2)) != 0)) return r;
+    if ((r = flush(v)) != 0) return r;
+    if (v->tex) changed(v, CHG_BM | ((bit >> 3) >> v->sshift));
     if (v->free != NOCOUNT) { if (on) --v->free; else ++v->free; }
     return OFS_EXFAT_OK;
 }
@@ -452,8 +601,15 @@ static int alloc(struct ofs_exfat *v, ofs_u32 want, ofs_u32 *clu)
             if (!(bit & 7) && s[at] == 0xFF && bit + 8 <= v->clusters) { bit += 8; n += 8; }
             else {
                 if (!(s[at] >> (bit & 7) & 1)) {
-                    *clu = bit + 2; v->hint = bit + 3;
-                    return set_bit(v, *clu, 1);
+                    int used = 0;
+                    /* TexFAT: not a cluster the committed state still uses
+                       (freed in this transaction) */
+                    if (v->tex && (r = used_active(v, bit + 2, &used)) != 0) return r;
+                    if (!used) {
+                        *clu = bit + 2; v->hint = bit + 3;
+                        return set_bit(v, *clu, 1);
+                    }
+                    if (!(s = sector(v, lba))) return OFS_EXFAT_EIO;
                 }
                 ++bit; ++n;
             }
@@ -471,7 +627,8 @@ static int set_fat(struct ofs_exfat *v, ofs_u32 clu, ofs_u32 next)
     if (!s) return OFS_EXFAT_EIO;
     wr32(s + ((unsigned)(clu << 2) & ((1u << v->sshift) - 1)), next);
     if ((r = flush(v)) != 0) return r;
-    return v->fat2 ? mirror(v, v->fat2 + off) : OFS_EXFAT_OK;
+    if (v->tex) changed(v, off);
+    return OFS_EXFAT_OK;
 }
 
 /* the clusters a file or directory has */
@@ -503,7 +660,8 @@ static ofs_fsize bytes_of(struct ofs_exfat *v, ofs_u32 n)
 
 /* *n clusters to want: contiguous (NoFatChain) while the next cluster is
    free, else a FAT chain.  zero: the new clusters are zeroed before they
-   are linked.  On OFS_EXFAT_EFULL *n tells how far it went. */
+   are linked (a directory: on TexFAT always a FAT chain, so a copied
+   cluster can be linked in).  On OFS_EXFAT_EFULL *n tells how far it went. */
 static int grow(struct ofs_exfat *v, struct ofs_exfat_file *f, ofs_u32 *n, ofs_u32 want, int zero)
 {
     ofs_u32 last = 0, clu, c, k;
@@ -518,7 +676,7 @@ static int grow(struct ofs_exfat *v, struct ofs_exfat_file *f, ofs_u32 *n, ofs_u
                 if (v->write(v->dev, v->start + v->heap + ((ofs_lba)(clu - 2) << v->cshift) + k, v->buf))
                     return OFS_EXFAT_EWRITE;
         }
-        if (!*n) { f->first = clu; f->nofat = (ofs_u8)!f->root; f->idx = 0; f->clu = clu; }
+        if (!*n) { f->first = clu; f->nofat = (ofs_u8)(!f->root && !(zero && v->tex)); f->idx = 0; f->clu = clu; }
         else if (f->nofat && clu != last + 1) {     /* no longer contiguous */
             for (c = f->first; c < last; ++c) if ((r = set_fat(v, c, c + 1)) != 0) return r;
             if ((r = set_fat(v, last, EOC)) != 0) return r;
@@ -565,16 +723,45 @@ static int shrink(struct ofs_exfat *v, struct ofs_exfat_file *f, ofs_u32 n, ofs_
 
 static ofs_u8 fe[32], se[32];            /* file and stream entry of a set */
 
+/* TexFAT: the cluster of a directory that holds pos, before it changes --
+   one the committed state uses is copied to a new one, which takes its
+   place in the working FAT. Not the first cluster (padding, or made
+   elsewhere), nor a directory without a FAT chain. */
+static int own(struct ofs_exfat *v, struct ofs_exfat_file *d, ofs_u32 pos)
+{
+    ofs_u32 idx = pos >> CB(v), c, p, next, n, k;
+    ofs_lba from, to;
+    int r, used;
+    if (!v->tex || !idx || d->nofat) return OFS_EXFAT_OK;
+    if ((r = walk(v, d, idx, &c)) != 0) return bad(r);
+    if ((r = used_active(v, c, &used)) != 0) return r;
+    if (!used) return OFS_EXFAT_OK;             /* new in this transaction */
+    if ((r = walk(v, d, idx - 1, &p)) != 0) return bad(r);
+    if (!(next = fat_next(v, c))) return OFS_EXFAT_EIO;
+    if ((r = alloc(v, c + 1, &n)) != 0) return r;
+    from = v->heap + ((ofs_lba)(c - 2) << v->cshift);
+    to = v->heap + ((ofs_lba)(n - 2) << v->cshift);
+    for (k = 0; k < 1UL << v->cshift; ++k) {
+        if (!sector(v, from + k)) return OFS_EXFAT_EIO;
+        if (v->write(v->dev, v->start + to + k, v->buf)) return OFS_EXFAT_EWRITE;
+    }
+    if ((r = set_fat(v, n, next)) != 0 || (r = set_fat(v, p, n)) != 0) return r;
+    if ((r = set_bit(v, c, 0)) != 0) return r;
+    ++v->gen;                                   /* every walk cache is stale */
+    return OFS_EXFAT_OK;
+}
+
 /* Writes e as the entry at pos; the sector goes to the medium when the
    entry is the last one in it, or when last (the next entry is then not
-   in the cache's sector). */
+   in the cache's sector); on TexFAT always (own reads other sectors). */
 static int put_entry(struct ofs_exfat *v, struct ofs_exfat_file *d, ofs_u32 pos, const ofs_u8 *e, int last)
 {
     const ofs_u8 *p;
-    int r = dir_entry(v, d, pos, &p);
-    if (r) return bad(r);
+    int r = own(v, d, pos);
+    if (r) return r;
+    if ((r = dir_entry(v, d, pos, &p)) != 0) return bad(r);
     memcpy((ofs_u8 *)p, e, 32);
-    return last || !((pos + 32) & ((1u << v->sshift) - 1)) ? flush(v) : OFS_EXFAT_OK;
+    return v->tex || last || !((pos + 32) & ((1u << v->sshift) - 1)) ? flush(v) : OFS_EXFAT_OK;
 }
 
 /* fe and se of the set at pos; *n its secondary count */
@@ -713,7 +900,16 @@ static int place(struct ofs_exfat *v, struct ofs_exfat_file *dir, struct ofs_exf
     wr16(s+4, name_hash(v, name, len));
     for (i = 0; i < n; ++i) { make_entry(i, e, f, s, name, len); sum = checksum(sum, e, !i); }
     wr16(f+2, sum);
-    for (p = 0; run < n; p += 32) {
+    /* TexFAT: after the first cluster, its end entries padding first (an
+       entry 00h would end the directory before the new set) */
+    p = 0;
+    if (v->tex) {
+        ofs_u32 c;
+        if ((r = walk(v, dir, 0, &c)) != 0) return bad(r);
+        if ((r = pad_cluster(v, c, 1)) != 0) return r;
+        p = 1UL << CB(v);
+    }
+    for (; run < n; p += 32) {
         r = dir_entry(v, dir, p, &x);
         if (r == OFS_EXFAT_END) {
             if ((r = grow_dir(v, dir, dw)) != 0) return r;
@@ -738,9 +934,10 @@ static int unmark(struct ofs_exfat *v, struct ofs_exfat_file *d, ofs_u32 pos, un
     unsigned i;
     int r;
     for (i = 0; i <= n; ++i) {
+        if ((r = own(v, d, pos + 32UL*i)) != 0) return r;
         if ((r = dir_entry(v, d, pos + 32UL*i, &e)) != 0) return bad(r);
         ((ofs_u8 *)e)[0] &= 0x7F;
-        if (i == n || !((pos + 32UL*(i + 1)) & ((1u << v->sshift) - 1)))
+        if (v->tex || i == n || !((pos + 32UL*(i + 1)) & ((1u << v->sshift) - 1)))
             if ((r = flush(v)) != 0) return r;
     }
     return OFS_EXFAT_OK;
@@ -833,6 +1030,8 @@ int ofs_exfat_create(struct ofs_exfat *v, struct ofs_exfat_file *dir, struct ofs
     if (attr & OFS_EXFAT_DIR) {
         if ((r = grow(v, &f, &n, 1, 1)) != 0) return r;
         f.size = f.valid = 1UL << CB(v);
+        /* TexFAT: the first cluster is padding, entries go after it */
+        if (v->tex && (r = pad_cluster(v, f.first, 0)) != 0) { shrink(v, &f, 1, 0); return r; }
     }
     memset(fe, 0, 32); memset(se, 0, 32);
     wr16(fe+4, attr);
@@ -878,7 +1077,7 @@ int ofs_exfat_empty(struct ofs_exfat *v, struct ofs_exfat_file *dir)
         if (r == OFS_EXFAT_END) return 1;
         if (r) return r;
         if (!e[0]) return 1;
-        if (e[0] & 0x80) return 0;
+        if ((e[0] & 0x80) && e[0] != 0xA1) return 0;   /* TexFAT padding is no content */
     }
 }
 

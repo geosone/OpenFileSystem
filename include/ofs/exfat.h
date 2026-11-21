@@ -32,6 +32,8 @@ typedef int (*ofs_exfat_read_fn)(void *dev, ofs_lba lba, void OFS_FAR *buf);
 /* Writes one sector at lba of the device. */
 typedef int (*ofs_exfat_write_fn)(void *dev, ofs_lba lba, const void OFS_FAR *buf);
 
+#define OFS_EXFAT_CHG 32          /* changed sectors a transaction tracks */
+
 struct ofs_exfat {
     ofs_exfat_read_fn read;
     void *dev;
@@ -49,8 +51,28 @@ struct ofs_exfat {
                                    after another one used it */
     /* writing: set write after ofs_exfat_mount; 0 keeps the volume read-only */
     ofs_exfat_write_fn write;
-    ofs_u32 fat2, bitmap2;       /* TexFAT: the inactive FAT and bitmap, kept
-                                   equal to the active ones; else 0 */
+    /* TexFAT (two FATs and bitmaps): changes are transactions. They go
+       to the working copies only -- the inactive FAT and bitmap, made
+       equal to the active ones at the first change after mount -- and
+       directory clusters are copied before they change (never the first
+       cluster of a directory: it is padding, TexFAT padding entries, so
+       no entry that points to a directory changes). ofs_exfat_clean
+       commits: ActiveFat flips in the boot sector, one sector write, and
+       the changed sectors go to the new working copies. A crash before
+       the flip leaves the volume as it was, one after it as it is now.
+       Not covered: file data overwritten in place, entries in the first
+       cluster of a directory made elsewhere, directories without a FAT
+       chain (NoFatChain) made elsewhere. */
+    ofs_u8 tex;                  /* TexFAT: transactions */
+    ofs_u8 tx;                   /* a transaction is open */
+    ofs_u8 synced;               /* the working copies equal the active ones */
+    ofs_u8 nchg, chg_all;        /* sectors changed in the transaction (all: too many) */
+    ofs_u32 fat_a, fat_w;        /* active and working FAT (fat is fat_w after the first change) */
+    ofs_u32 bm_a, bm_w;          /* active and working bitmap (bitmap likewise) */
+    ofs_u32 fat_len, bm_len;     /* sectors of a FAT, bytes of a bitmap */
+    ofs_u32 chg[OFS_EXFAT_CHG];  /* the changed sectors: 80000000h a bitmap's, else a FAT's */
+    ofs_u16 gen;                 /* raised when a directory cluster is copied:
+                                    walk caches of an older one are stale */
     ofs_u32 upcase, upcase_len;  /* the up-case table, for name hashes */
     ofs_u32 hint;                /* the next free cluster is looked for here */
     ofs_u32 free;                /* free clusters, 0FFFFFFFFh: not counted */
@@ -66,6 +88,7 @@ struct ofs_exfat_file {
     ofs_u8 nofat;                /* contiguous, no FAT chain */
     ofs_u8 big;                  /* narrow: 4 GB or larger, read-only */
     ofs_u8 root;                 /* root directory: size from the chain */
+    ofs_u16 gen;                 /* of the walk cache (ofs_exfat.gen) */
 };
 
 /* Where the entry set of a file or directory is: the directory (as in
@@ -95,7 +118,8 @@ int ofs_exfat_free(struct ofs_exfat *, ofs_u32 *free_clusters);
    (a FAT chained one with root set); dw the place of its own entry, which
    changes when the directory grows.  Names are UTF-16, 1-255 characters,
    checked by the caller.  Each call leaves the volume consistent;
-   VolumeDirty stays set until ofs_exfat_clean. */
+   VolumeDirty stays set until ofs_exfat_clean.  On TexFAT the calls up to
+   ofs_exfat_clean are one transaction and VolumeDirty is not set. */
 void ofs_exfat_where_of(const struct ofs_exfat_file *dir, ofs_u32 pos, struct ofs_exfat_where *);
 void ofs_exfat_where_dir(const struct ofs_exfat_where *, struct ofs_exfat_file *dir);
 /* Writes len bytes at off, from valid on with zeros before off; the file
