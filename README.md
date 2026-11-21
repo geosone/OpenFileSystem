@@ -19,6 +19,8 @@ GonWare.
 | FAT check | `src/fat/fat_check.c` | checking and repairing FAT12/16/32 after the rules of fsck.fat |
 | FAT defrag | `src/fat/fat_defrag.c` | defragmenting FAT12/16/32, in a write order that survives power loss |
 | Image tool | `tools/ofimg.c` | host tool: formats an exFAT volume in a disk image (a partition or a superfloppy), makes directories and puts files, without mounting it (mtools knows no exFAT): `ofimg IMAGE START format SECTORS [LABEL] mkdir PATH put FILE PATH …` |
+| Common interface | `src/vol.c`, `include/ofs/vol.h` | one interface over every core (`ofs_mount`, `ofs_next`, `ofs_lookup`, `ofs_read`, `ofs_write`, `ofs_create`, `ofs_remove`, `ofs_rename`, `ofs_resize`, `ofs_sync`): the host gives its sector access once (`struct ofs_host`), the frontends never touch a core; cores left out with `OFS_NO_FAT`/`OFS_NO_EXFAT`/`OFS_NO_NTFS`, every write path with `OFS_READONLY` (docs/DESIGN.md) |
+| FUSE | `hosts/posix/ofsfuse.c` | `ofsfuse [-o part=N] [-o ro] [-o cp=850] IMAGE MOUNTPOINT`: a FAT, exFAT or NTFS volume of an image (superfloppy or a partition) mounted through FUSE 3 over the common interface, to test the cores with Linux tools |
 | NTFS | `src/ntfs/ntfs.c` | read-only: MFT records, runlists (fragmented and sparse files), attribute lists, directory indexes, 8.3 names (the DOS names Windows gave, else `~` and the record number in base 36), label, free space; not compressed or encrypted files; sectors of 512 bytes |
 
 Sector numbers (`ofs_lba`) and file sizes (`ofs_fsize`) have 64 bits in
@@ -42,6 +44,8 @@ make test       # quick tests
 make dos-check  # every source as a 16-bit DOS object (OpenWatcom, WATCOM=/opt/watcom)
 make check      # everything, including the image tests
 make ntfs-check # NTFS against ntfs-3g (random trees, all cluster sizes), fuzzing
+make fuse       # build/host/ofsfuse (needs FUSE 3: pkg-config fuse3)
+make fuse-check # the cores through ofsfuse against mkfs, fsck and the Linux drivers
 ```
 
 The image tests compare with what the Linux drivers read and write, and

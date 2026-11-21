@@ -20,7 +20,7 @@ TESTBINS := $(H)/test_exfat $(H)/test_exfat_write $(H)/test_exchk $(H)/test_exfm
 	$(H)/test_fatchk $(H)/test_defrag $(H)/test_fat_format $(H)/test_part $(H)/test_fat_write $(H)/test_exfat_big \
 	$(H)/ofimg $(H)/test_ntfs
 
-.PHONY: ntfs-check all test check dos-check clean
+.PHONY: ntfs-check fuse fuse-check all test check dos-check clean
 all: $(TESTBINS)
 
 # quick tests without images
@@ -77,6 +77,19 @@ $(H)/test_exfat_big: CFLAGS := $(subst -std=c90,-std=c99,$(CFLAGS))
 $(TESTBINS):
 	mkdir -p $(@D)
 	$(CC) $(CPPFLAGS) $(CFLAGS) -o $@ $(filter %.c,$^)
+
+# ofsfuse (hosts/posix): every core through the common interface
+# (src/vol.c), mounted with FUSE 3 -- for testing the cores on Linux
+FUSESRC := hosts/posix/ofsfuse.c src/vol.c src/fat/fat.c src/exfat/exfat.c src/ntfs/ntfs.c src/part/part.c $(CPSRC)
+fuse: $(H)/ofsfuse
+$(H)/ofsfuse: $(FUSESRC) $(HDR)
+	mkdir -p $(@D)
+	$(CC) $(CPPFLAGS) -std=gnu99 -Wall -Wextra -Werror -O2 $$(pkg-config --cflags fuse3) -o $@ \
+		$(filter %.c,$^) $$(pkg-config --libs fuse3)
+# the cores through ofsfuse against the Linux tools (mkfs, fsck, mtools,
+# ntfs-3g): trees copied in and out, renamed, removed, compared
+fuse-check: $(H)/ofsfuse
+	bash tests/fuse_host.sh
 
 # every source as a 16-bit DOS object (small model, 8086), so the library
 # stays usable by the DOS drivers and tools

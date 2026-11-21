@@ -177,6 +177,16 @@ core directly.
 ## Migration (each step keeps every consumer working)
 
 0. **Rename** `ofat_` → `ofs_`, `openfat/` → `ofs/` (done 2026-11-21).
+   **Begun 2026-11-21:** `include/ofs/vol.h` + `src/vol.c`, the common
+   interface over FAT, exFAT and NTFS, with a first, minimal `struct
+   ofs_host` (one-sector read/write, the clock, the time zone; the
+   allocation, lock and log hooks come with the hosts that need them), and
+   `hosts/posix/ofsfuse.c` on it. `make fuse-check` (tests/fuse_host.sh):
+   FAT12/16/32 and exFAT written through ofsfuse, compared with a
+   reference tree, clean in fsck, and read back by the Linux drivers; NTFS
+   (ntfs-3g's volume, compressed and sparse files) read through it.
+   Times are kept in the DOS form with the host's offset for now, not yet
+   as UTC.
 1. **Host interface and config**: add `ofs/host.h` and `ofs/config.h`.
    The existing `ofs_*_read_fn` callbacks are implemented on top of them;
    no call site changes. `hosts/posix` first: the tests and `ofimg` use it.
