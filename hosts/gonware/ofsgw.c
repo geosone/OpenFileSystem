@@ -2,8 +2,9 @@
 /* The GonWare host: one driver of GonWare's volume layer (struct fs_driver,
    kernel/include/kernel/fs.h) over the common interface (include/ofs/vol.h).
    GonWare builds it once per module with the cores that module carries:
-   FAT.GLM with OFS_NO_NTFS (FAT12/16/32 and exFAT), NTFS.GLM with
-   OFS_NO_FAT OFS_NO_EXFAT OFS_READONLY. OFS_GW_NAME names the driver, the
+   FAT.GLM with OFS_NO_NTFS OFS_NO_ISO (FAT12/16/32 and exFAT), NTFS.GLM
+   with OFS_NO_FAT OFS_NO_EXFAT OFS_NO_ISO OFS_READONLY, CDFS.GLM (ISO 9660)
+   with OFS_NO_FAT OFS_NO_EXFAT OFS_NO_NTFS OFS_READONLY. OFS_GW_NAME names the driver, the
    module itself (GLM_MODULE) stays GonWare's and calls fs_register with
    ofs_gw_driver.
 
@@ -71,7 +72,16 @@ static void now(void *dev, ofs_u16 *t, ofs_u16 *d)
 	fs_dos_time(t, d);
 }
 
-static int probe(const uint8_t *s) { return ofs_probe(s); }
+/* ISO 9660 has no boot sector to probe: its mount looks at block 16 */
+static int probe(const uint8_t *s)
+{
+#ifndef OFS_NO_ISO
+	(void)s;
+	return 1;
+#else
+	return ofs_probe(s);
+#endif
+}
 
 /* the volume layer's label: 11 bytes; FAT's as stored (OEM code page),
    the others' ASCII with '?' for the rest */
@@ -117,6 +127,8 @@ static int mount(struct volume *v)
 #endif
 	host.now = now;
 	host.tz = (ofs_s16)(clock_zone_offset() / 60); /* NTFS keeps UTC, DOS times are local */
+	while ((1u << host.sshift) < v->disk->block_size)
+		host.sshift++;
 	r = ofs_mount(&s->vol, &host, v, v->start, fs_codepage(), s->buf);
 	if (r)
 		return r;
