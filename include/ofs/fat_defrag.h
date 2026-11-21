@@ -17,6 +17,14 @@
 #define OFS_DEFRAG_FAR
 #endif
 
+/* a file's number in the work list: 16 bits under DOS (65534 files with
+   clusters), 32 bits in native builds (a server volume) */
+#ifdef __WATCOMC__
+typedef ofs_u16 ofs_defrag_idx;
+#else
+typedef ofs_u32 ofs_defrag_idx;
+#endif
+
 #define OFS_DEFRAG_FULL    0             /* files contiguous, directories first, free space at the end */
 #define OFS_DEFRAG_FILES   1             /* only the fragmented files made contiguous */
 #define OFS_DEFRAG_ANALYZE 2             /* nothing written */
@@ -47,7 +55,7 @@ struct ofs_defrag {
        at least 16) */
     void OFS_DEFRAG_FAR *(*mem)(void *ctx, ofs_u32 off);
     ofs_u32 memsize, block;
-    ofs_u16 OFS_DEFRAG_FAR *order;        /* maxitems entries, for the files sorted by cluster */
+    ofs_defrag_idx OFS_DEFRAG_FAR *order; /* maxitems entries, for the files sorted by cluster */
     unsigned maxitems;
     void OFS_DEFRAG_FAR *buf;            /* copy buffer */
     unsigned bufsize;                   /* bytes, at least one sector */

@@ -27,12 +27,17 @@
 #define NOBUF    0xFFFFFFFFUL
 #define EOC      0xFFFFFFFFUL           /* normalized FAT values */
 #define BADCLU   0xFFFFFFF7UL
-#define NONE     0xFFFFU                /* no file; the parent of the root's entries */
+#define NONE     ((ofs_defrag_idx)-1)   /* no file; the parent of the root's entries */
 #define MAXDEPTH 64
 #define F_DIR    1
 #define F_FRAG   2
 
+#ifdef __WATCOMC__
 struct item { ofs_u32 first, count; ofs_u16 parent, slot; ofs_u8 flags, pad[3]; };
+#else
+struct item { ofs_u32 first, count; ofs_defrag_idx parent; ofs_u16 slot; ofs_u8 flags, pad[1]; };
+#endif
+typedef char item_is_16_bytes[sizeof(struct item) == 16 ? 1 : -1];
 /* a FAT sector (lba from the start of the FAT), written to all FATs */
 struct fsec { ofs_u32 lba; int dirty; ofs_u8 b[MAXS]; };
 /* a directory: the fixed FAT12/16 root, or a cluster chain */
@@ -143,7 +148,7 @@ static unsigned pos_of(ofs_u32 first, unsigned n)
 }
 
 /* the movable file that holds cluster c, NONE */
-static ofs_u16 owner(ofs_u32 c)
+static ofs_defrag_idx owner(ofs_u32 c)
 {
     unsigned k = pos_of(c + 1, nitems);
     struct item FAR *it;
@@ -154,22 +159,22 @@ static ofs_u16 owner(ofs_u32 c)
 }
 
 /* file i starts at first now: its place in the sorted list */
-static void resort(ofs_u16 i, ofs_u32 first)
+static void resort(ofs_defrag_idx i, ofs_u32 first)
 {
     unsigned k = pos_of(item(i)->first, nitems);
-    FMEMMOVE(D->order + k, D->order + k + 1, (nitems - k - 1) * sizeof(ofs_u16));
+    FMEMMOVE(D->order + k, D->order + k + 1, (nitems - k - 1) * sizeof(ofs_defrag_idx));
     item(i)->first = first;
     k = pos_of(first, nitems - 1);
-    FMEMMOVE(D->order + k + 1, D->order + k, (nitems - 1 - k) * sizeof(ofs_u16));
+    FMEMMOVE(D->order + k + 1, D->order + k, (nitems - 1 - k) * sizeof(ofs_defrag_idx));
     D->order[k] = i;
 }
 
 static void sort(void)
 {
     unsigned gap, i, j;
-    ofs_u16 v;
+    ofs_defrag_idx v;
     ofs_u32 f;
-    for (i = 0; i < nitems; ++i) D->order[i] = (ofs_u16)i;
+    for (i = 0; i < nitems; ++i) D->order[i] = (ofs_defrag_idx)i;
     for (gap = nitems / 2; gap; gap /= 2)
         for (i = gap; i < nitems; ++i) {
             v = D->order[i]; f = item(v)->first;
@@ -291,7 +296,7 @@ static int chain(ofs_u32 first, ofs_u32 *count, int *frag)
 
 /* ---- directories ---- */
 
-static void dir_of(struct dir *d, ofs_u16 parent)
+static void dir_of(struct dir *d, ofs_defrag_idx parent)
 {
     memset(d, 0, sizeof(*d));
     if (parent != NONE) d->first = item(parent)->first;
@@ -339,7 +344,7 @@ static int is_name(const ofs_u8 FAR *e, const char *name)
 }
 
 /* the files and subdirectories of a directory, then those of the subdirectories */
-static int walk(ofs_u16 parent, unsigned depth)
+static int walk(ofs_defrag_idx parent, unsigned depth)
 {
     struct dir d;
     struct item FAR *it;
@@ -365,13 +370,13 @@ static int walk(ofs_u16 parent, unsigned depth)
         if (frag) ++D->fragmented;
     }
     for (to = nitems, i = from; i < to; ++i)
-        if (item(i)->flags & F_DIR && (rc = walk((ofs_u16)i, depth + 1)) != 0) return rc;
+        if (item(i)->flags & F_DIR && (rc = walk((ofs_defrag_idx)i, depth + 1)) != 0) return rc;
     return 0;
 }
 
 /* ---- moving a file ---- */
 
-static int move(ofs_u16 i, ofs_u32 t)
+static int move(ofs_defrag_idx i, ofs_u32 t)
 {
     struct item FAR *it = item(i), FAR *s;
     struct dir d;
@@ -456,7 +461,7 @@ static int unfragment(int to_end)
         say("Joining fragmented files: %lu left", (unsigned long)left--);
         if (!(t = to_end ? last_fit(it->count, 2) : first_fit(it->count, 2))) continue;
         if (stopped()) return OFS_DEFRAG_ESTOP;
-        if ((rc = move((ofs_u16)i, t)) != 0) return rc;
+        if ((rc = move((ofs_defrag_idx)i, t)) != 0) return rc;
     }
     return 0;
 }
@@ -466,7 +471,7 @@ static int full(void)
     struct item FAR *it;
     ofs_u32 p = 2, c, n, t;
     unsigned pass, k, placed = 0;
-    ofs_u16 o;
+    ofs_defrag_idx o;
     int rc;
     for (pass = 0; pass < 2; ++pass)    /* directories, then files */
         for (k = 0; k < nitems; ++k) {
@@ -480,7 +485,7 @@ static int full(void)
                 if (p + n > nclu + 2) return 0;
                 if ((c = skip(p, p + n, 0)) == p + n) {
                     if (stopped()) return OFS_DEFRAG_ESTOP;
-                    if ((rc = move((ofs_u16)k, p)) != 0) return rc;
+                    if ((rc = move((ofs_defrag_idx)k, p)) != 0) return rc;
                     p += n;
                     break;
                 }

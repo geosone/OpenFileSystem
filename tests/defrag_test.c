@@ -39,7 +39,7 @@ static void *at(void *ctx, ofs_u32 off) { (void)ctx; return mem + off; }
 
 int main(int argc, char **argv)
 {
-    static ofs_u16 order[65535];
+    static ofs_defrag_idx order[65535];
     static unsigned char buf[32768];
     struct ofs_defrag d;
     ofs_u32 c, last = 0, gaps = 0;
