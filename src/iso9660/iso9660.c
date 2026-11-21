@@ -4,6 +4,7 @@
    System Use Sharing Protocol and Rock Ridge as IEEE P1281/P1282. */
 #include <string.h>
 #include "ofs/iso9660.h"
+#include "ofs/dostime.h"
 
 #ifdef __WATCOMC__
 #define fmemcpy _fmemcpy
@@ -51,54 +52,13 @@ static int ceblock(struct ofs_iso *v, ofs_u32 blk)
 
 /* ---- times ---- */
 
-/* days since 1970-01-01 of a date (Howard Hinnant's days_from_civil) */
-static ofs_s32 days(ofs_s32 y, unsigned m, unsigned d)
-{
-    ofs_s32 era, yoe, doy, doe;
-    y -= m <= 2;
-    era = (y >= 0 ? y : y - 399) / 400;
-    yoe = y - era * 400;
-    doy = (ofs_s32)((153 * (m + (m > 2 ? (unsigned)-3 : 9)) + 2) / 5) + (ofs_s32)d - 1;
-    doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
-    return era * 146097L + doe - 719468L;
-}
-
-static void civil(ofs_s32 z, ofs_s32 *y, unsigned *m, unsigned *d)
-{
-    ofs_s32 era, doe, yoe, doy, mp;
-    z += 719468L;
-    era = (z >= 0 ? z : z - 146096L) / 146097L;
-    doe = z - era * 146097L;
-    yoe = (doe - doe / 1460 + doe / 36524L - doe / 146096L) / 365;
-    *y = yoe + era * 400;
-    doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
-    mp = (5 * doy + 2) / 153;
-    *d = (unsigned)(doy - (153 * mp + 2) / 5 + 1);
-    *m = (unsigned)(mp < 10 ? mp + 3 : mp - 9);
-    *y += *m <= 2;
-}
-
 /* the 7-byte time of a directory record (local with its offset from UTC
    in 15 minutes) as a DOS time of the host's zone */
 static void dostime(const struct ofs_iso *v, const ofs_u8 *t, ofs_u16 *time, ofs_u16 *date)
 {
-    ofs_s32 min, y;
-    unsigned mo, d, h, mi;
     signed char off = (signed char)t[6];
-
-    *time = *date = 0;
-    if (!t[1] || t[1] > 12 || !t[2] || t[2] > 31 || t[3] > 23 || t[4] > 59) return;
     if (off < -48 || off > 52) off = 0;
-    min = (days(1900 + (ofs_s32)t[0], t[1], t[2]) * 24 + t[3]) * 60 + t[4];
-    min += v->tz - (ofs_s32)off * 15;
-    if (min < 0) return;
-    civil(min / 1440, &y, &mo, &d);
-    if (y < 1980) return;
-    if (y > 2107) { y = 2107; mo = 12; d = 31; min = 1439; }
-    h = (unsigned)(min % 1440 / 60);
-    mi = (unsigned)(min % 60);
-    *time = (ofs_u16)(h << 11 | mi << 5 | (t[5] > 59 ? 29 : t[5] / 2));
-    *date = (ofs_u16)((ofs_u16)(y - 1980) << 9 | mo << 5 | d);
+    ofs_dostime(1900 + (ofs_s32)t[0], t[1], t[2], t[3], t[4], t[5], (ofs_s32)off * 15, v->tz, time, date);
 }
 
 /* ---- names ---- */

@@ -191,7 +191,10 @@ core directly.
    Ridge, Joliet, several extents), the first without a boot sector:
    `struct ofs_fs` with probe NULL is tried by `ofs_mount` after the
    others, and `struct ofs_host` carries the device's sector size
-   (`sshift`). Next cores: UDF (read-only first; writing for GonDesk).
+   (`sshift`). Then UDF (`src/udf/`), also read-only for good: ISO and
+   UDF media are made by burning software ported to the hosts, not by the
+   cores. Both share `src/dostime.c` (a calendar time with a zone as the
+   host's DOS time).
 1. **Host interface and config**: add `ofs/host.h` and `ofs/config.h`.
    The existing `ofs_*_read_fn` callbacks are implemented on top of them;
    no call site changes. `hosts/posix` first: the tests and `ofimg` use it.

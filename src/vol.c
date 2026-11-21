@@ -436,6 +436,65 @@ static const struct ofs_fs fs_iso = {
 };
 #endif
 
+/* ---- UDF (read-only) ---- */
+#ifndef OFS_NO_UDF
+static int udf_err(int r) { return r == OFS_UDF_EUNSUP ? OFS_ENOTSUP : r; }
+
+static int udf_mount(struct ofs_vol *v, ofs_lba start, const struct ofs_cp *cp, ofs_u8 *buf)
+{
+    struct ofs_udf *x = &v->u.udf;
+    int r = ofs_udf_mount(x, (ofs_udf_read_fn)v->host.read, v->dev, start, v->host.sshift ? v->host.sshift : 9,
+                          cp, buf);
+    if (r) return udf_err(r);
+    x->tz = v->host.tz;
+    v->type = "UDF";
+    label16(v, x->label, x->label_len);
+    return 0;
+}
+
+static void udf_root(struct ofs_vol *v, struct ofs_node *n) { ofs_udf_rootdir(&v->u.udf, &n->u.udf); }
+
+static struct ofs_udf_ent uent;
+
+static int udf_next(struct ofs_vol *v, struct ofs_node *dir, ofs_u32 *pos, struct ofs_dirent *de)
+{
+    struct ofs_node *n = &de->node;
+    int r = ofs_udf_dir_next(&v->u.udf, &dir->u.udf, pos, &uent);
+    if (r) return udf_err(r);
+    memset(n, 0, sizeof(*n));
+    de->name_len = uent.name_len;
+    memcpy(de->name, uent.name, uent.name_len * sizeof(ofs_u16));
+    de->attr = n->attr = uent.attr;
+    de->time = uent.time;
+    de->date = uent.date;
+    n->dir = uent.file.dir;
+    n->size = uent.file.size;
+    n->u.udf = uent.file;
+    return 0;
+}
+
+static int udf_read(struct ofs_vol *v, struct ofs_node *n, ofs_fsize off, void OFS_FAR *buf, ofs_u16 len,
+                    ofs_u16 *done)
+{
+    return udf_err(ofs_udf_read(&v->u.udf, &n->u.udf, off, buf, len, done));
+}
+
+static int udf_statfs(struct ofs_vol *v, ofs_u32 *fr, ofs_u32 *cb, ofs_u32 *cl)
+{
+    *fr = 0;
+    *cb = (ofs_u32)1 << v->u.udf.bshift;
+    *cl = v->u.udf.blocks;
+    return 0;
+}
+
+static const struct ofs_fs fs_udf = {
+    NULL, udf_mount, udf_root, udf_next, NULL, udf_read, udf_statfs
+#ifndef OFS_READONLY
+    , NULL, NULL, NULL, NULL, NULL, NULL, NULL, 0
+#endif
+};
+#endif
+
 /* exFAT and NTFS before FAT: their boot sectors are not FAT's, but FAT's
    probe is the most forgiving */
 static const struct ofs_fs *const all[] = {
@@ -447,6 +506,9 @@ static const struct ofs_fs *const all[] = {
 #endif
 #ifndef OFS_NO_FAT
     &fs_fat,
+#endif
+#ifndef OFS_NO_UDF
+    &fs_udf,                      /* before ISO 9660: a UDF bridge disc is read as UDF */
 #endif
 #ifndef OFS_NO_ISO
     &fs_iso,

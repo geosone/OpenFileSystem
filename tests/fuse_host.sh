@@ -19,6 +19,12 @@
 # read with 512- and 2048-byte sectors (an image, a CD drive), deep
 # directories, and with ISO_BIG=1 a 4.5 GiB file of several extents.
 #
+# UDF: cdrtools' mkisofs -udf (a UDF 1.02 bridge, read as UDF), and with
+# mkudffs (udftools) volumes of UDF 2.01, 2.50 and 2.60 (metadata
+# partition) in 512- and 2048-byte blocks, filled through the Linux UDF
+# driver (udisksctl); each read with 512- and 2048-byte sectors where the
+# block size allows.
+#
 # KEEP=dir keeps the images and trees of a failure.
 set -eu
 here=$(cd "$(dirname "$0")/.." && pwd)
@@ -174,5 +180,52 @@ if command -v xorriso >/dev/null; then
 	echo "iso9660 passed (read-only)"
 else
 	echo "iso9660 skipped (no xorriso)"
+fi
+# UDF
+udfsrc=$work/udfsrc
+mkdir -p "$udfsrc/a/b/c/d/e/f/g/h/i/j" "$udfsrc/viele" "$udfsrc/Ordner mit langem Namen"
+printf 'hallo\r\n' > "$udfsrc/README.TXT"
+printf 'tief\r\n' > "$udfsrc/a/b/c/d/e/f/g/h/i/j/tief.txt"
+printf 'Umlaute\r\n' > "$udfsrc/Ordner mit langem Namen/Größere Datei mit langem Namen.txt"
+for n in 0 1 511 512 2047 2048 2049 65536 1000003; do head -c $n /dev/urandom > "$udfsrc/r$n.bin"; done
+for i in $(seq 1 300); do printf 'Nummer %d\r\n' $i > "$udfsrc/viele/datei$i.txt"; done
+if mkisofs -version 2>/dev/null | grep -q '^mkisofs 3'; then
+	rm -f "$work/t.iso"
+	mkisofs -quiet -udf -R -J -V OFSUDF -o "$work/t.iso" "$udfsrc" 2>/dev/null || fail "mkisofs -udf"
+	for sec in 512 2048; do
+		mount_ofs -o sector=$sec "$work/t.iso"
+		grep -q 'UDF "OFSUDF", read-only' "$work/ofsfuse.log" || { cat "$work/ofsfuse.log" >&2; fail "udf bridge: mounted as"; }
+		ref=$udfsrc compare "$mnt" "udf bridge sector=$sec"
+		umount_ofs
+	done
+	echo "udf 1.02 bridge passed (read-only)"
+else
+	echo "udf bridge skipped (no cdrtools mkisofs)"
+fi
+if command -v mkudffs >/dev/null && command -v udisksctl >/dev/null; then
+	for rev in 2.01 2.50 2.60; do
+		for bs in 512 2048; do
+			img=$work/udf.img
+			rm -f "$img"; truncate -s 64M "$img"
+			mkudffs -q --media-type=hd --udfrev=$rev --blocksize=$bs --label=OFSUDF "$img" >/dev/null || fail "mkudffs $rev $bs"
+			loop=$(udisksctl loop-setup --no-user-interaction -f "$img" | sed -n 's/.* as \(\/dev\/[a-z0-9]*\)\.$/\1/p')
+			udisksctl mount --no-user-interaction -b "$loop" >/dev/null || fail "udf $rev $bs: udisksctl mount"
+			lm=$(lsblk -no MOUNTPOINT "$loop")
+			cp -r "$udfsrc/." "$lm/" || fail "udf $rev $bs: filling through Linux"
+			udisksctl unmount --no-user-interaction -b "$loop" >/dev/null
+			udisksctl loop-delete --no-user-interaction -b "$loop" >/dev/null
+			loop=
+			for sec in 512 2048; do
+				[ $sec -le $bs ] || continue
+				mount_ofs -o sector=$sec "$img"
+				grep -q 'UDF "OFSUDF", read-only' "$work/ofsfuse.log" || { cat "$work/ofsfuse.log" >&2; fail "udf $rev $bs: mounted as"; }
+				ref=$udfsrc compare "$mnt" "udf $rev blocks=$bs sector=$sec"
+				umount_ofs
+			done
+		done
+	done
+	echo "udf 2.01/2.50/2.60 passed (read-only)"
+else
+	echo "udf 2.x skipped (no mkudffs or udisksctl)"
 fi
 echo "ofsfuse tests passed"
