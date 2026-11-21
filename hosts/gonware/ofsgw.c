@@ -2,9 +2,10 @@
 /* The GonWare host: one driver of GonWare's volume layer (struct fs_driver,
    kernel/include/kernel/fs.h) over the common interface (include/ofs/vol.h).
    GonWare builds it once per module with the cores that module carries:
-   FAT.GLM with OFS_NO_NTFS OFS_NO_ISO (FAT12/16/32 and exFAT), NTFS.GLM
-   with OFS_NO_FAT OFS_NO_EXFAT OFS_NO_ISO OFS_READONLY, CDFS.GLM (ISO 9660)
-   with OFS_NO_FAT OFS_NO_EXFAT OFS_NO_NTFS OFS_READONLY. OFS_GW_NAME names the driver, the
+   FAT.GLM with OFS_NO_NTFS OFS_NO_ISO OFS_NO_UDF (FAT12/16/32 and exFAT),
+   NTFS.GLM with OFS_NO_FAT OFS_NO_EXFAT OFS_NO_ISO OFS_NO_UDF
+   OFS_READONLY, CDFS.GLM (UDF, ISO 9660) with OFS_NO_FAT OFS_NO_EXFAT
+   OFS_NO_NTFS OFS_READONLY. OFS_GW_NAME names the driver, the
    module itself (GLM_MODULE) stays GonWare's and calls fs_register with
    ofs_gw_driver.
 
@@ -72,10 +73,11 @@ static void now(void *dev, ofs_u16 *t, ofs_u16 *d)
 	fs_dos_time(t, d);
 }
 
-/* ISO 9660 has no boot sector to probe: its mount looks at block 16 */
+/* ISO 9660 and UDF have no boot sector to probe: their mount looks at
+   block 16 and the anchor at 256 */
 static int probe(const uint8_t *s)
 {
-#ifndef OFS_NO_ISO
+#if !defined(OFS_NO_ISO) || !defined(OFS_NO_UDF)
 	(void)s;
 	return 1;
 #else
