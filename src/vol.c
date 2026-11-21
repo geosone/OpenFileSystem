@@ -7,6 +7,7 @@
 #include "ofs/vol.h"
 
 struct ofs_fs {
+    /* NULL: no boot sector, mount itself looks (tried after the others) */
     int (*probe)(const ofs_u8 OFS_FAR *);
     int (*mount)(struct ofs_vol *, ofs_lba start, const struct ofs_cp *, ofs_u8 *buf);
     void (*root)(struct ofs_vol *, struct ofs_node *);
@@ -377,6 +378,64 @@ static const struct ofs_fs fs_ntfs = {
 };
 #endif
 
+/* ---- ISO 9660 (read-only) ---- */
+#ifndef OFS_NO_ISO
+static int iso_mount(struct ofs_vol *v, ofs_lba start, const struct ofs_cp *cp, ofs_u8 *buf)
+{
+    struct ofs_iso *x = &v->u.iso;
+    int r = ofs_iso_mount(x, (ofs_iso_read_fn)v->host.read, v->dev, start, v->host.sshift ? v->host.sshift : 9,
+                          cp, buf);
+    if (r) return r == OFS_ISO_EUNSUP ? OFS_ENOTSUP : r;
+    x->tz = v->host.tz;
+    v->type = "ISO9660";
+    label16(v, x->label, x->label_len);
+    return 0;
+}
+
+static void iso_root(struct ofs_vol *v, struct ofs_node *n) { ofs_iso_rootdir(&v->u.iso, &n->u.iso); }
+
+static struct ofs_iso_ent ient;
+
+static int iso_next(struct ofs_vol *v, struct ofs_node *dir, ofs_u32 *pos, struct ofs_dirent *de)
+{
+    struct ofs_node *n = &de->node;
+    int r = ofs_iso_dir_next(&v->u.iso, &dir->u.iso, pos, &ient);
+    if (r) return r == OFS_ISO_EUNSUP ? OFS_ENOTSUP : r;
+    memset(n, 0, sizeof(*n));
+    de->name_len = ient.name_len;
+    memcpy(de->name, ient.name, ient.name_len * sizeof(ofs_u16));
+    de->attr = n->attr = ient.attr;
+    de->time = ient.time;
+    de->date = ient.date;
+    n->dir = ient.file.dir;
+    n->size = ient.file.size;
+    n->u.iso = ient.file;
+    return 0;
+}
+
+static int iso_read(struct ofs_vol *v, struct ofs_node *n, ofs_fsize off, void OFS_FAR *buf, ofs_u16 len,
+                    ofs_u16 *done)
+{
+    int r = ofs_iso_read(&v->u.iso, &n->u.iso, off, buf, len, done);
+    return r == OFS_ISO_EUNSUP ? OFS_ENOTSUP : r;
+}
+
+static int iso_statfs(struct ofs_vol *v, ofs_u32 *fr, ofs_u32 *cb, ofs_u32 *cl)
+{
+    *fr = 0;
+    *cb = OFS_ISO_BLOCK;
+    *cl = v->u.iso.blocks;
+    return 0;
+}
+
+static const struct ofs_fs fs_iso = {
+    NULL, iso_mount, iso_root, iso_next, NULL, iso_read, iso_statfs
+#ifndef OFS_READONLY
+    , NULL, NULL, NULL, NULL, NULL, NULL, NULL, 0
+#endif
+};
+#endif
+
 /* exFAT and NTFS before FAT: their boot sectors are not FAT's, but FAT's
    probe is the most forgiving */
 static const struct ofs_fs *const all[] = {
@@ -389,6 +448,9 @@ static const struct ofs_fs *const all[] = {
 #ifndef OFS_NO_FAT
     &fs_fat,
 #endif
+#ifndef OFS_NO_ISO
+    &fs_iso,
+#endif
     NULL
 };
 
@@ -398,7 +460,7 @@ int ofs_probe(const ofs_u8 OFS_FAR *s)
 {
     unsigned i;
     for (i = 0; all[i]; ++i)
-        if (all[i]->probe(s)) return 1;
+        if (all[i]->probe && all[i]->probe(s)) return 1;
     return 0;
 }
 
@@ -412,12 +474,24 @@ int ofs_mount(struct ofs_vol *v, const struct ofs_host *host, void *dev, ofs_lba
     v->dev = dev;
     if (host->read(dev, start, buf)) return OFS_EIO;
     for (i = 0; all[i]; ++i)
-        if (all[i]->probe(buf)) break;
-    if (!all[i]) return OFS_EBAD;
-    v->fs = all[i];
-    if ((r = v->fs->mount(v, start, cp, buf))) {
-        v->fs = NULL;
-        return r;
+        if (all[i]->probe && all[i]->probe(buf)) break;
+    if (all[i]) {
+        v->fs = all[i];
+        if ((r = v->fs->mount(v, start, cp, buf))) {
+            v->fs = NULL;
+            return r;
+        }
+    } else {
+        /* the cores without a boot sector look themselves */
+        r = OFS_EBAD;
+        for (i = 0; all[i]; ++i) {
+            if (all[i]->probe) continue;
+            v->fs = all[i];
+            if (!(r = v->fs->mount(v, start, cp, buf))) break;
+            v->fs = NULL;
+            if (r != OFS_EBAD) return r;
+        }
+        if (!v->fs) return r;
     }
 #ifndef OFS_READONLY
     if (host->write && v->fs->write) v->caps |= OFS_CAP_WRITE;

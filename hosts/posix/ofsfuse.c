@@ -5,11 +5,14 @@
    GonWare use. It is for testing the cores on Linux: what cp, diff, rsync
    or find do through it, the cores do.
 
-     ofsfuse [-o part=N] [-o ro] [-o cp=850] [-o unitab=DIR] IMAGE MOUNTPOINT [FUSE options]
+     ofsfuse [-o part=N] [-o ro] [-o sector=512] [-o cp=850] [-o unitab=DIR] IMAGE MOUNTPOINT [FUSE options]
 
    part=N: the N-th partition of an MBR/GPT (in table order, logical ones
-   after the primary ones); without it a superfloppy, else the first
-   partition with a file system the cores know.  cp: the code page of the
+   after the primary ones); without it a volume over the whole image (a
+   superfloppy, an ISO 9660 image -- also a hybrid one with a partition
+   table), else the first partition with a file system the cores know.
+   sector: the sector size the image is read with, 512 to 4096 (2048: as
+   a CD drive gives it).  cp: the code page of the
    8.3 names, from UNI_<cp>.TAB in unitab (mars-unicode-tables); without the
    table Latin-1.  NTFS is read-only.  It runs single-threaded (the cores
    take calls one at a time).  Times of new entries are the local time;
@@ -38,7 +41,7 @@
 
 static struct {
     char *image, *unitab, *cpname;
-    int part, ro;
+    int part, ro, sector;
 } opt;
 
 static int fd = -1;
@@ -471,6 +474,7 @@ static void load_cp(void)
 
 static const struct fuse_opt specs[] = {
     { "part=%d", offsetof(__typeof__(opt), part), 0 },
+    { "sector=%d", offsetof(__typeof__(opt), sector), 0 },
     { "unitab=%s", offsetof(__typeof__(opt), unitab), 0 },
     { "cp=%s", offsetof(__typeof__(opt), cpname), 0 },
     { "ro", offsetof(__typeof__(opt), ro), 1 },
@@ -499,7 +503,7 @@ int main(int argc, char **argv)
     int r;
 
     if (fuse_opt_parse(&args, &opt, specs, nonopt) || !opt.image) {
-        fprintf(stderr, "usage: ofsfuse [-o part=N] [-o ro] [-o cp=850] [-o unitab=DIR] IMAGE MOUNTPOINT\n");
+        fprintf(stderr, "usage: ofsfuse [-o part=N] [-o ro] [-o sector=512] [-o cp=850] [-o unitab=DIR] IMAGE MOUNTPOINT\n");
         return 2;
     }
     if ((fd = open(opt.image, opt.ro ? O_RDONLY : O_RDWR)) < 0) {
@@ -509,16 +513,16 @@ int main(int argc, char **argv)
     load_cp();
     memset(&k, 0, sizeof(k));
     k.want = opt.part;
-    if (rd(NULL, 0, b)) { fprintf(stderr, "ofsfuse: %s: unreadable\n", opt.image); return 1; }
-    if (opt.part || !ofs_probe(b)) {
-        r = ofs_part_scan(prd, NULL, 9, (ofs_u64)(lseek(fd, 0, SEEK_END) / ss), b, &disk, pick_part, &k);
-        if (r < 0 || !k.found) {
-            fprintf(stderr, "ofsfuse: %s: %s\n", opt.image, opt.part ? "no such partition" : "no volume found");
-            return 1;
+    if (opt.sector) {
+        if (opt.sector < 512 || opt.sector > 4096 || (opt.sector & (opt.sector - 1))) {
+            fprintf(stderr, "ofsfuse: sector=%d: 512, 1024, 2048 or 4096\n", opt.sector);
+            return 2;
         }
-        start = k.start;
+        ss = (unsigned)opt.sector;
     }
+    if (rd(NULL, 0, b)) { fprintf(stderr, "ofsfuse: %s: unreadable\n", opt.image); return 1; }
     memset(&host, 0, sizeof(host));
+    while ((1u << host.sshift) < ss) ++host.sshift;
     host.read = rd;
     host.write = opt.ro ? NULL : wr;
     host.now = now;
@@ -528,7 +532,18 @@ int main(int argc, char **argv)
         localtime_r(&s, &tm);
         host.tz = (ofs_s16)(tm.tm_gmtoff / 60);
     }
-    if ((r = ofs_mount(&vol, &host, NULL, start, &cp, vbuf))) {
+    /* the whole image first (a superfloppy, ISO 9660), then a partition */
+    r = opt.part ? OFS_EBAD : ofs_mount(&vol, &host, NULL, 0, &cp, vbuf);
+    if (r == OFS_EBAD) {
+        r = ofs_part_scan(prd, NULL, host.sshift, (ofs_u64)(lseek(fd, 0, SEEK_END) / ss), b, &disk, pick_part, &k);
+        if (r < 0 || !k.found) {
+            fprintf(stderr, "ofsfuse: %s: %s\n", opt.image, opt.part ? "no such partition" : "no volume found");
+            return 1;
+        }
+        start = k.start;
+        r = ofs_mount(&vol, &host, NULL, start, &cp, vbuf);
+    }
+    if (r) {
         fprintf(stderr, "ofsfuse: %s: not mounted (%d)\n", opt.image, r);
         return 1;
     }

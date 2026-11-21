@@ -14,6 +14,11 @@
 # sparse files, an attribute list ...) read through ofsfuse, read-only,
 # compared with its files.
 #
+# ISO 9660 (xorriso): the same tree with Rock Ridge, with Joliet only
+# (also long Joliet names), plain (8.3 names: contents compared), each
+# read with 512- and 2048-byte sectors (an image, a CD drive), deep
+# directories, and with ISO_BIG=1 a 4.5 GiB file of several extents.
+#
 # KEEP=dir keeps the images and trees of a failure.
 set -eu
 here=$(cd "$(dirname "$0")/.." && pwd)
@@ -124,5 +129,50 @@ if command -v mkntfs >/dev/null && command -v udisksctl >/dev/null && command -v
 	echo "ntfs passed (read-only)"
 else
 	echo "ntfs skipped (no mkntfs, udisksctl or ntfs-3g)"
+fi
+# ISO 9660
+if command -v xorriso >/dev/null; then
+	src=$work/isosrc
+	mkdir -p "$src/a/b/c/d/e/f/g/h/i/j" "$src/Ordner mit langem Namen"
+	printf 'hallo\r\n' > "$src/README.TXT"
+	printf 'tief\r\n' > "$src/a/b/c/d/e/f/g/h/i/j/tief.txt"
+	printf 'Umlaute\r\n' > "$src/Ordner mit langem Namen/Größere Datei mit langem Namen.txt"
+	for n in 0 1 2047 2048 2049 65535 65536 1000003; do head -c $n /dev/urandom > "$src/r$n.bin"; done
+	for mode in "-R -J" "--norock -J" "--norock -J -joliet-long" "--norock"; do
+		rm -f "$work/t.iso"
+		xorriso -as mkisofs -quiet $mode -V "OFS ISO" -o "$work/t.iso" "$src" 2>/dev/null || fail "xorriso $mode"
+		for sec in 512 2048; do
+			mount_ofs -o sector=$sec "$work/t.iso"
+			grep -q 'ISO9660 "OFS ISO", read-only' "$work/ofsfuse.log" || { cat "$work/ofsfuse.log" >&2; fail "iso [$mode]: mounted as"; }
+			if [ "$mode" = "--norock" ]; then
+				# 8.3 names in capitals: the contents
+				cmp "$src/r1000003.bin" "$mnt/R1000003.BIN" || fail "iso [$mode] $sec: content"
+				[ -f "$mnt/A/B/C/D/E/F/G/H/I/J/TIEF.TXT" ] || fail "iso [$mode] $sec: deep directory"
+			else
+				ref=$src compare "$mnt" "iso [$mode] sector=$sec"
+			fi
+			if touch "$mnt/neu.txt" 2>/dev/null; then fail "iso: writable"; fi
+			umount_ofs
+		done
+	done
+	if [ -n "${ISO_BIG:-}" ]; then
+		big=$work/bigsrc
+		mkdir -p "$big"
+		truncate -s 4500M "$big/gross.bin"
+		printf 'ANFANG' | dd of="$big/gross.bin" conv=notrunc 2>/dev/null
+		printf 'MITTE-4G' | dd of="$big/gross.bin" bs=1 seek=4294967290 conv=notrunc 2>/dev/null
+		printf 'ENDE' | dd of="$big/gross.bin" bs=1 seek=$((4500 * 1048576 - 4)) conv=notrunc 2>/dev/null
+		echo klein > "$big/danach.txt"
+		xorriso -as mkisofs -quiet -iso-level 3 -R -J -o "$work/big.iso" "$big" 2>/dev/null || fail "xorriso big"
+		rm -f "$work/t.iso"
+		mount_ofs "$work/big.iso"
+		ref=$big compare "$mnt" "iso: a file of several extents"
+		umount_ofs
+		rm -f "$work/big.iso"
+		echo "iso9660 big file passed"
+	fi
+	echo "iso9660 passed (read-only)"
+else
+	echo "iso9660 skipped (no xorriso)"
 fi
 echo "ofsfuse tests passed"

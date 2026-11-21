@@ -80,7 +80,7 @@ $(TESTBINS):
 
 # ofsfuse (hosts/posix): every core through the common interface
 # (src/vol.c), mounted with FUSE 3 -- for testing the cores on Linux
-FUSESRC := hosts/posix/ofsfuse.c src/vol.c src/fat/fat.c src/exfat/exfat.c src/ntfs/ntfs.c src/part/part.c $(CPSRC)
+FUSESRC := hosts/posix/ofsfuse.c src/vol.c src/fat/fat.c src/exfat/exfat.c src/ntfs/ntfs.c src/iso9660/iso9660.c src/part/part.c $(CPSRC)
 fuse: $(H)/ofsfuse
 $(H)/ofsfuse: $(FUSESRC) $(HDR)
 	mkdir -p $(@D)

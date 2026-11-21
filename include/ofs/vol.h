@@ -7,7 +7,7 @@
    the same for FAT, exFAT and NTFS.  The frontends (FUSE, the DOS
    redirector, GonWare's volume layer) use only this, never a core.
 
-   Which cores go in: OFS_NO_FAT, OFS_NO_EXFAT, OFS_NO_NTFS (all are in by
+   Which cores go in: OFS_NO_FAT, OFS_NO_EXFAT, OFS_NO_NTFS, OFS_NO_ISO (all are in by
    default); OFS_READONLY leaves every write path out.  Calls on one volume
    come one at a time (the host serialises them). */
 #include "ofs/types.h"
@@ -20,6 +20,9 @@
 #endif
 #ifndef OFS_NO_NTFS
 #include "ofs/ntfs.h"
+#endif
+#ifndef OFS_NO_ISO
+#include "ofs/iso9660.h"
 #endif
 
 /* results: the cores' own values where they agree, and more */
@@ -58,20 +61,21 @@ struct ofs_host {
     /* the local time as DOS keeps it, for new entries; NULL: 0 */
     void (*now)(void *dev, ofs_u16 *time, ofs_u16 *date);
     ofs_s16 tz;                   /* minutes east of UTC (NTFS keeps UTC) */
+    ofs_u8 sshift;                /* the device's sector size, a shift; 0: 512 */
 };
 
 /* the buffer a volume needs (the largest of the cores built in) */
 #ifndef OFS_NO_NTFS
 #define OFS_VOL_BUF (OFS_NTFS_MAXREC * 3 + 512)
 #else
-#define OFS_VOL_BUF 4096
+#define OFS_VOL_BUF 4096          /* also ISO 9660's OFS_ISO_BUF */
 #endif
 
 struct ofs_fs;
 
 struct ofs_vol {
     const struct ofs_fs *fs;
-    const char *type;             /* "FAT12", "FAT16", "FAT32", "exFAT", "NTFS" */
+    const char *type;             /* "FAT12", "FAT16", "FAT32", "exFAT", "NTFS", "ISO9660" */
     struct ofs_host host;
     void *dev;
     ofs_u8 caps;                  /* OFS_CAP_* */
@@ -86,6 +90,9 @@ struct ofs_vol {
 #endif
 #ifndef OFS_NO_NTFS
         struct ofs_ntfs ntfs;
+#endif
+#ifndef OFS_NO_ISO
+        struct ofs_iso iso;
 #endif
         ofs_u8 none;
     } u;
@@ -106,6 +113,9 @@ struct ofs_node {
 #ifndef OFS_NO_NTFS
         struct ofs_ntfs_file ntfs;
 #endif
+#ifndef OFS_NO_ISO
+        struct ofs_iso_file iso;
+#endif
         ofs_u8 none;
     } u;
 };
@@ -119,7 +129,8 @@ struct ofs_dirent {
     struct ofs_node node;
 };
 
-/* sector0 is the first sector of a volume; buf OFS_VOL_BUF bytes the host
+/* sector0 is the first sector of a volume (ofs_probe: 1 when a core with
+   a boot sector knows it; ISO 9660 has none, ofs_mount tries it last); buf OFS_VOL_BUF bytes the host
    keeps for the volume; cp the code page of the 8.3 names.  The volume is
    writable when host->write is set and the file system can write (it is
    read-only, OFS_CAP_WRITE clear, otherwise). */

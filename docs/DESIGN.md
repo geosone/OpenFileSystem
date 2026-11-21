@@ -187,6 +187,11 @@ core directly.
    (ntfs-3g's volume, compressed and sparse files) read through it.
    Times are kept in the DOS form with the host's offset for now, not yet
    as UTC.
+   **Then (2026-11-21):** ISO 9660 as a fourth core (`src/iso9660/`, Rock
+   Ridge, Joliet, several extents), the first without a boot sector:
+   `struct ofs_fs` with probe NULL is tried by `ofs_mount` after the
+   others, and `struct ofs_host` carries the device's sector size
+   (`sshift`). Next cores: UDF (read-only first; writing for GonDesk).
 1. **Host interface and config**: add `ofs/host.h` and `ofs/config.h`.
    The existing `ofs_*_read_fn` callbacks are implemented on top of them;
    no call site changes. `hosts/posix` first: the tests and `ofimg` use it.
