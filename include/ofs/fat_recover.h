@@ -1,0 +1,80 @@
+#ifndef OFS_FAT_RECOVER_H
+#define OFS_FAT_RECOVER_H
+/* FAT12/16/32 recovery for ORECOVER: the last attempt on a volume the
+   check cannot repair.  It never writes to the volume; the files go to the
+   caller (another drive).  What it takes:
+   - the boot sector, else the FAT32 backup (sector 6);
+   - the directory tree from the root: long names (when their checksum
+     fits) or 8.3 names, every file with its size;
+   - a cluster's FAT entry from the first copy that links it (a cluster or
+     the end of a chain), so a FAT that was wiped is replaced by another;
+   - a chain that breaks before the file's size is reached (a free, bad or
+     wrong entry, a cluster already taken) goes on with the clusters after
+     the last one, as UNDELETE guesses; such files are counted in guessed;
+   - unreadable sectors as zeros (counted in bad);
+   - with OFS_FATREC_SCAN the whole data area searched for the first
+     clusters of directories ("." and ".." entries) that the tree did not
+     reach; each, with what is below it, goes to \LOST\DIRnnnnn;
+   - with OFS_FATREC_CHAINS the chains in the FAT that nothing uses, as
+     \LOST\FILEnnnnn.CHK.
+   Paths handed to the caller are relative ("\DIR\FILE", UTF-8); names are
+   made safe for FAT (control characters and \/:*?"<>| become _). */
+#include "ofs/types.h"
+
+#ifdef __WATCOMC__
+#define OFS_FATREC_FAR __far
+#else
+#define OFS_FATREC_FAR
+#endif
+
+#define OFS_FATREC_INFO  0
+#define OFS_FATREC_WARN  1
+#define OFS_FATREC_ERROR 2
+
+#define OFS_FATREC_OK    0
+#define OFS_FATREC_EBAD  (-1)            /* no FAT boot sector, not even the backup */
+#define OFS_FATREC_EIO   (-2)            /* the boot sector cannot be read */
+#define OFS_FATREC_EMEM  (-3)            /* the work memory is too small */
+#define OFS_FATREC_ESTOP (-4)            /* stopped by the caller */
+
+#define OFS_FATREC_SCAN   1              /* search the data area for lost directories */
+#define OFS_FATREC_CHAINS 2              /* save the chains nothing uses */
+
+#define OFS_FATREC_MAXSECT 4096
+
+struct ofs_fatrec {
+    /* set by the caller */
+    int (*read)(void *dev, ofs_u32 lba, void OFS_FATREC_FAR *buf);    /* one sector */
+    void *dev;
+    ofs_u32 start;                       /* first sector of the volume */
+    const ofs_u16 *cp;                   /* Unicode of the OEM characters 80h-FFh; 0: '_' */
+    int flags;                           /* OFS_FATREC_SCAN, OFS_FATREC_CHAINS */
+    /* the target: nonzero from any of them is an error the run counts in
+       failed and goes on (a file that could not be made is skipped) */
+    int (*mkdir)(void *ctx, const char *path);
+    int (*create)(void *ctx, const char *path, ofs_u32 size, ofs_u16 time, ofs_u16 date);
+    int (*write)(void *ctx, const void *buf, unsigned len);
+    int (*close)(void *ctx);
+    void (*msg)(void *ctx, int level, const char *text);
+    int (*stop)(void *ctx);              /* nonzero: stop (0: never) */
+    /* work memory: two bits per cluster, and 8 bytes per directory found
+       by the scan; mem returns byte off, valid up to the end of its block
+       (block: a power of two, at least 8) */
+    void OFS_FATREC_FAR *(*mem)(void *ctx, ofs_u32 off);
+    ofs_u32 memsize, block;
+    ofs_u8 *buf;                         /* two sectors of OFS_FATREC_MAXSECT bytes */
+    void *ctx;
+    /* results */
+    unsigned bits;                       /* 12, 16 or 32 */
+    ofs_u32 clusters, cluster_size;
+    ofs_u32 files, dirs, bytes_lo, bytes_hi; /* bytes: saved, 64 bits */
+    ofs_u32 guessed;                     /* files whose chain was guessed */
+    ofs_u32 bad;                         /* unreadable sectors (zeros) */
+    ofs_u32 lost_dirs, lost_chains;      /* found by SCAN, CHAINS */
+    ofs_u32 failed;                      /* errors of the target */
+    int from_backup;                     /* the boot sector was the backup */
+};
+
+/* 0: done (the results tell); OFS_FATREC_EBAD, _EIO, _EMEM, _ESTOP. */
+int ofs_fatrec_run(struct ofs_fatrec *);
+#endif

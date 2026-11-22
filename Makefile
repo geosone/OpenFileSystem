@@ -18,7 +18,7 @@ H        := $(BUILD)/host
 
 TESTBINS := $(H)/test_exfat $(H)/test_exfat_write $(H)/test_exchk $(H)/test_exfmt \
 	$(H)/test_fatchk $(H)/test_defrag $(H)/test_fat_format $(H)/test_part $(H)/test_fat_write $(H)/test_exfat_big \
-	$(H)/ofimg $(H)/test_ntfs $(H)/test_texfat_crash $(H)/test_exdefrag
+	$(H)/ofimg $(H)/test_ntfs $(H)/test_texfat_crash $(H)/test_exdefrag $(H)/test_recover
 
 .PHONY: ntfs-check fuse fuse-check all test check dos-check clean
 all: $(TESTBINS)
@@ -35,6 +35,7 @@ check: all test dos-check
 	bash tests/fatchk_host.sh
 	bash tests/defrag_host.sh
 	bash tests/exdefrag_host.sh
+	bash tests/recover_host.sh
 	bash tests/exchk_host.sh
 	bash tests/exfmt_host.sh
 	bash tests/exfat_write.sh
@@ -68,6 +69,7 @@ $(H)/test_exfmt: tests/exfmt_test.c src/exfat/exfat_format.c src/exfat/upcase.c 
 $(H)/test_fatchk: tests/fatchk_test.c src/fat/fat_check.c $(CPSRC) $(HDR)
 $(H)/test_defrag: tests/defrag_test.c src/fat/fat_defrag.c $(HDR)
 $(H)/test_exdefrag: tests/exdefrag_test.c src/exfat/exfat_defrag.c $(EXFAT) $(HDR)
+$(H)/test_recover: tests/recover_test.c src/fat/fat_recover.c $(HDR)
 $(H)/test_fat_format: tests/fat_format_test.c src/fat/fat_format.c $(HDR)
 $(H)/test_fat_write: tests/fat_write_test.c $(FATSRC) $(HDR)
 $(H)/test_part: tests/part_test.c src/part/part.c $(HDR)
@@ -80,6 +82,7 @@ $(H)/test_fat_write: CPPFLAGS += -DOFS_FAT_MAXSECT=4096
 $(H)/test_exfat_big: CPPFLAGS += -DOFS_EXFAT_MAXSECT=4096
 # a host program with 64-bit printf (the library is checked as C90 elsewhere)
 $(H)/test_exfat_big: CFLAGS := $(subst -std=c90,-std=c99,$(CFLAGS))
+$(H)/test_recover: CFLAGS := $(subst -std=c90,-std=c99,$(CFLAGS))
 $(TESTBINS):
 	mkdir -p $(@D)
 	$(CC) $(CPPFLAGS) $(CFLAGS) -o $@ $(filter %.c,$^)
