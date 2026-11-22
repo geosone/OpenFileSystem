@@ -34,6 +34,12 @@ typedef int (*ofs_exfat_write_fn)(void *dev, ofs_lba lba, const void OFS_FAR *bu
 
 #define OFS_EXFAT_CHG 32          /* changed sectors a transaction tracks */
 
+/* moving files for defragmentation (exfat_defrag.c): in native builds,
+   under DOS only on request (it is not needed by the drivers) */
+#if !defined(__WATCOMC__) || defined(OFS_EXFAT_RELOCATE)
+#define OFS_EXFAT_HAS_RELOCATE 1
+#endif
+
 struct ofs_exfat {
     ofs_exfat_read_fn read;
     void *dev;
@@ -77,6 +83,12 @@ struct ofs_exfat {
     ofs_u32 hint;                /* the next free cluster is looked for here */
     ofs_u32 free;                /* free clusters, 0FFFFFFFFh: not counted */
     ofs_u8 dirty;                /* VolumeDirty: 1 set by us, 2 set at mount */
+#ifdef OFS_EXFAT_HAS_RELOCATE
+    /* TexFAT: the directory clusters ofs_exfat_relocate's last call
+       copied before it changed them ({old, new}) */
+    ofs_u8 ncow;
+    ofs_u32 cow[2][2];
+#endif
 };
 
 /* A file or directory: its cluster chain and the cluster last walked to. */
@@ -151,6 +163,30 @@ int ofs_exfat_time(struct ofs_exfat *, struct ofs_exfat_file *dir, ofs_u32 pos, 
                   ofs_u16 time, ofs_u16 date, ofs_u8 cs10);
 /* VolumeDirty cleared (unless it was set before the mount), PercentInUse. */
 int ofs_exfat_clean(struct ofs_exfat *);
+
+#ifdef OFS_EXFAT_HAS_RELOCATE
+/* Defragmentation.  ofs_exfat_used: the cluster is in use (the working
+   bitmap).  ofs_exfat_next: its FAT entry.  ofs_exfat_movable: 0 when the
+   entry set at pos of dir cannot be switched safely -- its file and stream
+   entries in two sectors where the switch is not one transaction (exFAT,
+   and on TexFAT an entry in the first cluster of its directory or in a
+   directory without a FAT chain, which are written in place).
+   ofs_exfat_relocate moves the clusters of the file or directory whose
+   entry set is at pos of dir (first: its first cluster, as the caller saw
+   it) to the free clusters from target on, contiguous: they are marked,
+   the data copied, linked when it had a FAT chain (it keeps NoFatChain
+   otherwise), the stream entry switched (one sector), the old clusters
+   freed.  A power loss leaves at worst lost clusters (exFAT; VolumeDirty
+   stays set until ofs_exfat_clean).  On TexFAT the move is one
+   transaction, committed; with its entry written in place two: the new
+   clusters first, the old ones freed after the switch.  v->cow lists the
+   directory clusters TexFAT copied on the way.  OFS_EXFAT_EBAD: the set
+   is not as expected; OFS_EXFAT_EFULL: a target cluster is in use. */
+int ofs_exfat_used(struct ofs_exfat *, ofs_u32 clu, int *used);
+int ofs_exfat_next(struct ofs_exfat *, ofs_u32 clu, ofs_u32 *next);
+int ofs_exfat_movable(struct ofs_exfat *, const struct ofs_exfat_file *dir, ofs_u32 pos);
+int ofs_exfat_relocate(struct ofs_exfat *, struct ofs_exfat_file *dir, ofs_u32 pos, ofs_u32 first, ofs_u32 target);
+#endif
 
 /* 8.3 names: fcb is the 11-character FCB form ("LETTER~1TXT").  Returns 1
    when the long name had to be changed (it then needs a "~n"). */

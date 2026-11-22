@@ -30,7 +30,8 @@ add_library(OpenFileSystem::fat ALIAS openfilesystem_fat)
 add_library(openfilesystem_check STATIC
   src/exfat/exfat_check.c
   src/fat/fat_check.c
-  src/fat/fat_defrag.c)
+  src/fat/fat_defrag.c
+  src/exfat/exfat_defrag.c)
 target_link_libraries(openfilesystem_check PUBLIC openfilesystem_fat)
 add_library(OpenFileSystem::check ALIAS openfilesystem_check)
 

@@ -748,6 +748,9 @@ static int own(struct ofs_exfat *v, struct ofs_exfat_file *d, ofs_u32 pos)
     if ((r = set_fat(v, n, next)) != 0 || (r = set_fat(v, p, n)) != 0) return r;
     if ((r = set_bit(v, c, 0)) != 0) return r;
     ++v->gen;                                   /* every walk cache is stale */
+#ifdef OFS_EXFAT_HAS_RELOCATE
+    if (v->ncow < 2) { v->cow[v->ncow][0] = c; v->cow[v->ncow][1] = n; ++v->ncow; }
+#endif
     return OFS_EXFAT_OK;
 }
 
@@ -1115,3 +1118,90 @@ int ofs_exfat_time(struct ofs_exfat *v, struct ofs_exfat_file *dir, ofs_u32 pos,
     fe[22 + k] = 0;                             /* no UTC offset */
     return put_set(v, dir, pos);
 }
+
+#ifdef OFS_EXFAT_HAS_RELOCATE
+/* ---- defragmentation: moving a file or directory ---- */
+
+int ofs_exfat_used(struct ofs_exfat *v, ofs_u32 clu, int *used)
+{
+    ofs_u32 bit = clu - 2;
+    ofs_lba lba;
+    const ofs_u8 *s;
+    int r;
+    if (clu < 2 || clu >= v->clusters + 2) return OFS_EXFAT_EBAD;
+    if ((r = bitmap_lba(v, v->bitmap, bit, &lba)) != 0) return r;
+    if (!(s = sector(v, lba))) return OFS_EXFAT_EIO;
+    *used = s[(unsigned)(bit >> 3) & ((1u << v->sshift) - 1)] >> (bit & 7) & 1;
+    return OFS_EXFAT_OK;
+}
+
+int ofs_exfat_next(struct ofs_exfat *v, ofs_u32 clu, ofs_u32 *next)
+{
+    if (clu < 2 || clu >= v->clusters + 2) return OFS_EXFAT_EBAD;
+    return (*next = fat_next(v, clu)) != 0 ? OFS_EXFAT_OK : OFS_EXFAT_EIO;
+}
+
+/* the entry set is written in place, not in a transaction */
+static int in_place(const struct ofs_exfat *v, const struct ofs_exfat_file *dir, ofs_u32 pos)
+{
+    return !v->tex || dir->nofat || !(pos >> CB(v));
+}
+
+int ofs_exfat_movable(struct ofs_exfat *v, const struct ofs_exfat_file *dir, ofs_u32 pos)
+{
+    return !in_place(v, dir, pos) || ((unsigned)pos & ((1u << v->sshift) - 1)) + 64 <= (1u << v->sshift);
+}
+
+int ofs_exfat_relocate(struct ofs_exfat *v, struct ofs_exfat_file *dir, ofs_u32 pos, ofs_u32 first, ofs_u32 target)
+{
+    struct ofs_exfat_file f, old;
+    struct ofs_exfat_where w;
+    ofs_u32 n, k, c;
+    ofs_lba from, to;
+    unsigned m, j;
+    int r, used, inplace = in_place(v, dir, pos);
+    v->ncow = 0;
+    if (!ofs_exfat_movable(v, dir, pos)) return OFS_EXFAT_EBAD;
+    if ((r = begin(v)) != 0) return r;
+    if ((r = get_set(v, dir, pos, &m)) != 0) return r;
+    stream_file(se, &f);
+    if (f.first != first || f.first < 2) return OFS_EXFAT_EBAD;
+    if ((r = nclusters(v, &f, &n)) != 0) return r;
+    if (!n || target < 2 || target > v->clusters + 2 - n) return OFS_EXFAT_EBAD;
+    /* 1. the new clusters: free, on TexFAT in the committed state too */
+    for (k = 0; k < n; ++k) {
+        if ((r = ofs_exfat_used(v, target + k, &used)) != 0) return r;
+        if (!used && v->tex && (r = used_active(v, target + k, &used)) != 0) return r;
+        if (used) return OFS_EXFAT_EFULL;
+    }
+    for (k = 0; k < n; ++k)
+        if ((r = set_bit(v, target + k, 1)) != 0) return r;
+    /* 2. the data, cluster by cluster */
+    old = f;
+    for (k = 0; k < n; ++k) {
+        if ((r = walk(v, &old, k, &c)) != 0) return bad(r);
+        from = v->heap + ((ofs_lba)(c - 2) << v->cshift);
+        to = v->heap + ((ofs_lba)(target + k - 2) << v->cshift);
+        for (j = 0; j < 1u << v->cshift; ++j) {
+            if (!sector(v, from + j)) return OFS_EXFAT_EIO;
+            if (v->write(v->dev, v->start + to + j, v->buf)) return OFS_EXFAT_EWRITE;
+        }
+    }
+    /* 3. the chain, when it had one */
+    if (!f.nofat)
+        for (k = 0; k < n; ++k)
+            if ((r = set_fat(v, target + k, k + 1 < n ? target + k + 1 : EOC)) != 0) return r;
+    /* TexFAT, the entry written in place: the new clusters committed first */
+    if (v->tex && inplace && ((r = commit(v)) != 0 || (r = begin(v)) != 0)) return r;
+    /* 4. the stream entry */
+    f.first = target; f.idx = 0; f.clu = 0;
+    ofs_exfat_where_of(dir, pos, &w);
+    if ((r = put_stream(v, &w, &f)) != 0) return r;
+    /* 5. the old clusters freed (their FAT entries do not matter) */
+    for (k = 0; k < n; ++k) {
+        if ((r = walk(v, &old, k, &c)) != 0) return bad(r);
+        if ((r = set_bit(v, c, 0)) != 0) return r;
+    }
+    return v->tex ? commit(v) : OFS_EXFAT_OK;
+}
+#endif

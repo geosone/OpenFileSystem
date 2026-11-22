@@ -18,7 +18,7 @@ H        := $(BUILD)/host
 
 TESTBINS := $(H)/test_exfat $(H)/test_exfat_write $(H)/test_exchk $(H)/test_exfmt \
 	$(H)/test_fatchk $(H)/test_defrag $(H)/test_fat_format $(H)/test_part $(H)/test_fat_write $(H)/test_exfat_big \
-	$(H)/ofimg $(H)/test_ntfs $(H)/test_texfat_crash
+	$(H)/ofimg $(H)/test_ntfs $(H)/test_texfat_crash $(H)/test_exdefrag
 
 .PHONY: ntfs-check fuse fuse-check all test check dos-check clean
 all: $(TESTBINS)
@@ -34,6 +34,7 @@ check: all test dos-check
 	bash tests/fat_write.sh
 	bash tests/fatchk_host.sh
 	bash tests/defrag_host.sh
+	bash tests/exdefrag_host.sh
 	bash tests/exchk_host.sh
 	bash tests/exfmt_host.sh
 	bash tests/exfat_write.sh
@@ -66,6 +67,7 @@ $(H)/test_exchk: tests/exchk_test.c src/exfat/exfat_check.c $(EXFAT) $(HDR)
 $(H)/test_exfmt: tests/exfmt_test.c src/exfat/exfat_format.c src/exfat/upcase.c $(HDR)
 $(H)/test_fatchk: tests/fatchk_test.c src/fat/fat_check.c $(CPSRC) $(HDR)
 $(H)/test_defrag: tests/defrag_test.c src/fat/fat_defrag.c $(HDR)
+$(H)/test_exdefrag: tests/exdefrag_test.c src/exfat/exfat_defrag.c $(EXFAT) $(HDR)
 $(H)/test_fat_format: tests/fat_format_test.c src/fat/fat_format.c $(HDR)
 $(H)/test_fat_write: tests/fat_write_test.c $(FATSRC) $(HDR)
 $(H)/test_part: tests/part_test.c src/part/part.c $(HDR)
