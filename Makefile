@@ -36,6 +36,7 @@ check: all test dos-check
 	bash tests/defrag_host.sh
 	bash tests/exdefrag_host.sh
 	bash tests/recover_host.sh
+	bash tests/exrecover_host.sh
 	bash tests/exchk_host.sh
 	bash tests/exfmt_host.sh
 	bash tests/exfat_write.sh
@@ -69,7 +70,7 @@ $(H)/test_exfmt: tests/exfmt_test.c src/exfat/exfat_format.c src/exfat/upcase.c 
 $(H)/test_fatchk: tests/fatchk_test.c src/fat/fat_check.c $(CPSRC) $(HDR)
 $(H)/test_defrag: tests/defrag_test.c src/fat/fat_defrag.c $(HDR)
 $(H)/test_exdefrag: tests/exdefrag_test.c src/exfat/exfat_defrag.c $(EXFAT) $(HDR)
-$(H)/test_recover: tests/recover_test.c src/fat/fat_recover.c $(HDR)
+$(H)/test_recover: tests/recover_test.c src/fat/fat_recover.c src/exfat/exfat_recover.c $(HDR)
 $(H)/test_fat_format: tests/fat_format_test.c src/fat/fat_format.c $(HDR)
 $(H)/test_fat_write: tests/fat_write_test.c $(FATSRC) $(HDR)
 $(H)/test_part: tests/part_test.c src/part/part.c $(HDR)

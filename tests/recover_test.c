@@ -22,7 +22,7 @@ static char bad[256];
 static unsigned long badlo[64], badhi[64];
 static unsigned nbad;
 
-static int img_read(void *dev, ofs_u32 lba, void *buf)
+static int img_read(void *dev, ofs_lba lba, void *buf)
 {
     unsigned i;
     (void)dev;
@@ -50,7 +50,7 @@ static int t_mkdir(void *ctx, const char *p)
     return mkdir(h, 0755) && errno != EEXIST ? -1 : 0;
 }
 
-static int t_create(void *ctx, const char *p, ofs_u32 size, ofs_u16 time, ofs_u16 date)
+static int t_create(void *ctx, const char *p, ofs_fsize size, ofs_u16 time, ofs_u16 date)
 {
     char h[2048], h2[2100];
     struct stat st;
@@ -107,10 +107,17 @@ int main(int argc, char **argv)
     r.msg = msg;
     r.mem = at, r.memsize = MEM, r.block = 1UL << 30;
     r.buf = buf;
-    rc = ofs_fatrec_run(&r);
+    {
+        unsigned char b[512];
+        if (fread(b, 1, sizeof(b), image) == sizeof(b) && !memcmp(b + 3, "EXFAT   ", 8)) rc = ofs_exfatrec_run(&r);
+        else if (fseek(image, 12L * 512, SEEK_SET) == 0 && fread(b, 1, sizeof(b), image) == sizeof(b) &&
+                 !memcmp(b + 3, "EXFAT   ", 8)) rc = ofs_exfatrec_run(&r);
+        else rc = ofs_fatrec_run(&r);
+    }
     if (rc) { printf("not recovered: %d\n", rc); return 2; }
-    printf("FAT%u: %lu files, %lu directories, %lu bytes; guessed %lu, bad sectors %lu, lost directories %lu, "
-           "lost chains %lu, failed %lu\n", r.bits, (unsigned long)r.files, (unsigned long)r.dirs,
+    if (r.bits == 64) printf("exFAT%s", r.texfat ? " (TexFAT)" : ""); else printf("FAT%u", r.bits);
+    printf(": %lu files, %lu directories, %lu bytes; guessed %lu, bad sectors %lu, lost directories %lu, "
+           "lost chains %lu, failed %lu\n", (unsigned long)r.files, (unsigned long)r.dirs,
            (unsigned long)r.bytes_lo, (unsigned long)r.guessed, (unsigned long)r.bad, (unsigned long)r.lost_dirs,
            (unsigned long)r.lost_chains, (unsigned long)r.failed);
     return 0;

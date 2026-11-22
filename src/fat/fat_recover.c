@@ -230,7 +230,7 @@ static void save_file(ofs_u32 first, ofs_u32 size, ofs_u16 time, ofs_u16 date)
     ofs_u32 lba;
     unsigned j, len;
     int guessed = 0, failed = 0;
-    if (R->create(R->ctx, path, size, time, date)) {
+    if (R->create(R->ctx, path, (ofs_fsize)size, time, date)) {
         ++R->failed;
         say(OFS_FATREC_ERROR, "%s: cannot be made on the target", path);
         return;
@@ -515,7 +515,7 @@ int ofs_fatrec_run(struct ofs_fatrec *r)
     r->bits = 0;
     r->files = r->dirs = r->bytes_lo = r->bytes_hi = r->guessed = r->bad = 0;
     r->lost_dirs = r->lost_chains = r->failed = 0;
-    r->from_backup = 0;
+    r->from_backup = r->texfat = 0;
     dbuf = r->buf, fbuf = r->buf + OFS_FATREC_MAXSECT;
     dsec = fsec = NOSEC;
     ncand = lost_no = 0;
