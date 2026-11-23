@@ -1,6 +1,6 @@
 #!/bin/sh
 # exFAT recovery (build/host/test_recover) on the image of
-# tests/exdefrag_image.sh (mkfs.exfat and Linux's driver: fragmented files
+# tests/exdefrag_image.sh (mkfs.exfat and Linux's driver, else ofimg: fragmented files
 # with FAT chains, contiguous NoFatChain files, a fragmented directory with
 # subdirectories, an empty file, a file whose valid data length is below
 # its size), with 4K and 512-byte clusters. Each copy is damaged in turn:
@@ -24,7 +24,7 @@ ROOT=$(cd "$(dirname "$0")/.." && pwd)
 dir=${1:-$ROOT/build/exrecover-host}
 rec=$ROOT/build/host/test_recover
 make -C "$ROOT" -s build/host/test_recover
-for t in mkfs.exfat fsck.exfat udisksctl python3; do command -v $t >/dev/null || { echo "SKIP: $t"; exit 0; }; done
+for t in python3; do command -v $t >/dev/null || { echo "SKIP: $t"; exit 0; }; done
 rm -rf "$dir"; mkdir -p "$dir"
 fail=0
 

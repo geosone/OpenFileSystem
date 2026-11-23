@@ -8,6 +8,16 @@
      put FILE PATH           the host file as PATH (replaced if there, the
                              name keeping its case); PATH ending in '/' or
                              '\' takes the name of FILE
+     append FILE PATH        the host file added at the end of PATH (made
+                             when it is not there)
+     rm PATH                 the file, or the empty directory, removed
+     size PATH BYTES         the file made BYTES long (longer: zeros past
+                             its valid data length)
+     cluster BYTES           the cluster size of the following format (0:
+                             by the size)
+     align SECTORS           the cluster heap of the following format on a
+                             multiple of SECTORS (2048: 1 MiB, as mkfs.exfat,
+                             room for a second FAT)
 
    START is the first sector of the volume in the image (a partition), 0
    for a superfloppy.  Paths are UTF-8, '/' or '\' separated, compared
@@ -28,6 +38,7 @@ static int mounted;
 static ofs_u8 sector_buf[OFS_EXFAT_MAXSECT];
 static struct ofs_exfat_ent ent;
 static ofs_u16 now_time, now_date;
+static unsigned long cluster, align;
 
 static int img_read(void *dev, ofs_lba lba, void *buf)
 {
@@ -148,6 +159,8 @@ static void do_format(unsigned long sectors, const char *label)
     f.sectors = (ofs_u32)sectors;
     f.hidden = (ofs_u32)start;
     f.nfats = 1;
+    f.cluster = (ofs_u32)cluster;
+    f.align = (ofs_u32)align;
     f.serial = (ofs_u32)time(NULL);
     if (label) f.label_len = (ofs_u8)to16(label, (unsigned)(strlen(label) > 11 ? 11 : strlen(label)), f.label);
     if (ofs_exfmt_layout(&f)) fail("no exFAT layout for", "SECTORS", 0);
@@ -172,6 +185,77 @@ static void do_mkdir(const char *path)
     }
     if ((r = ofs_exfat_create(&vol, &dir, &dw, name, n, OFS_EXFAT_DIR, now_time, now_date, &pos)))
         fail("cannot make", path, r);
+}
+
+/* the file at path into ent (its directory into dir, dw): 0, or 1 when
+   it is not there; name, n its last part */
+static int lookup(const char *path, struct ofs_exfat_file *dir, struct ofs_exfat_where *dw, ofs_u16 *name,
+                  unsigned *n, int make)
+{
+    need_mount();
+    if (!(*n = walk(path, make, dir, dw, name))) fail("no name in", path, 0);
+    return find(dir, name, *n);
+}
+
+static void do_rm(const char *path)
+{
+    struct ofs_exfat_file dir, sub;
+    struct ofs_exfat_where dw;
+    ofs_u16 name[256];
+    unsigned n;
+    int r;
+    if (lookup(path, &dir, &dw, name, &n, 0)) fail("no file", path, 0);
+    if (ent.attr & OFS_EXFAT_DIR) {
+        sub = ent.file;
+        if (!sub.nofat) sub.root = 1;
+        if (ofs_exfat_empty(&vol, &sub) != 1) fail("not empty:", path, 0);
+    }
+    if ((r = ofs_exfat_remove(&vol, &dir, ent.pos))) fail("cannot remove", path, r);
+}
+
+static void do_size(const char *path, const char *bytes)
+{
+    struct ofs_exfat_file dir, f;
+    struct ofs_exfat_where dw, w;
+    ofs_u16 name[256];
+    unsigned n;
+    int r;
+    if (lookup(path, &dir, &dw, name, &n, 0) || ent.attr & OFS_EXFAT_DIR) fail("no file", path, 0);
+    f = ent.file;
+    ofs_exfat_where_of(&dir, ent.pos, &w);
+    if ((r = ofs_exfat_resize(&vol, &f, &w, (ofs_fsize)strtoull(bytes, NULL, 0)))) fail("cannot resize", path, r);
+}
+
+static void do_append(const char *file, const char *path)
+{
+    static ofs_u8 buf[32768];
+    struct ofs_exfat_file dir, f;
+    struct ofs_exfat_where dw, w;
+    ofs_u16 name[256];
+    ofs_u32 pos;
+    ofs_fsize off;
+    ofs_u16 done;
+    unsigned n;
+    size_t got;
+    FILE *h;
+    int r;
+    if (lookup(path, &dir, &dw, name, &n, 1)) {
+        if ((r = ofs_exfat_create(&vol, &dir, &dw, name, n, OFS_EXFAT_ARCH, now_time, now_date, &pos)))
+            fail("cannot create", path, r);
+        if (find(&dir, name, n)) fail("lost the new file", path, 0);
+    } else if (ent.attr & OFS_EXFAT_DIR) {
+        fail("a directory is in the way of", path, 0);
+    }
+    f = ent.file;
+    off = f.size;
+    ofs_exfat_where_of(&dir, ent.pos, &w);
+    if (!(h = fopen(file, "rb"))) { perror(file); exit(1); }
+    while ((got = fread(buf, 1, sizeof(buf), h)) > 0) {
+        if ((r = ofs_exfat_write(&vol, &f, &w, off, buf, (ofs_u16)got, &done)) || done != got)
+            fail("cannot write", path, r);
+        off += got;
+    }
+    fclose(h);
 }
 
 static void do_put(const char *file, const char *path)
@@ -222,7 +306,8 @@ int main(int argc, char **argv)
     int i, r;
 
     if (argc < 4) {
-        fputs("ofimg IMAGE START [format SECTORS [LABEL]] [mkdir PATH] [put FILE PATH] ...\n", stderr);
+        fputs("ofimg IMAGE START [cluster BYTES] [align SECTORS] [format SECTORS [LABEL]] [mkdir PATH] [put FILE PATH]\n"
+              "      [append FILE PATH] [rm PATH] [size PATH BYTES] ...\n", stderr);
         return 2;
     }
     now_time = (ofs_u16)(tm->tm_hour << 11 | tm->tm_min << 5 | tm->tm_sec / 2);
@@ -231,7 +316,9 @@ int main(int argc, char **argv)
     start = strtoul(argv[2], NULL, 0);
     for (i = 3; i < argc; ) {
         if (!strcmp(argv[i], "format") && i + 1 < argc) {
-            int label = i + 2 < argc && strcmp(argv[i + 2], "mkdir") && strcmp(argv[i + 2], "put");
+            int label = i + 2 < argc && strcmp(argv[i + 2], "mkdir") && strcmp(argv[i + 2], "put") &&
+                        strcmp(argv[i + 2], "append") && strcmp(argv[i + 2], "rm") && strcmp(argv[i + 2], "size") &&
+                        strcmp(argv[i + 2], "cluster") && strcmp(argv[i + 2], "align");
             do_format(strtoul(argv[i + 1], NULL, 0), label ? argv[i + 2] : NULL);
             i += label ? 3 : 2;
         } else if (!strcmp(argv[i], "mkdir") && i + 1 < argc) {
@@ -240,6 +327,21 @@ int main(int argc, char **argv)
         } else if (!strcmp(argv[i], "put") && i + 2 < argc) {
             do_put(argv[i + 1], argv[i + 2]);
             i += 3;
+        } else if (!strcmp(argv[i], "append") && i + 2 < argc) {
+            do_append(argv[i + 1], argv[i + 2]);
+            i += 3;
+        } else if (!strcmp(argv[i], "rm") && i + 1 < argc) {
+            do_rm(argv[i + 1]);
+            i += 2;
+        } else if (!strcmp(argv[i], "size") && i + 2 < argc) {
+            do_size(argv[i + 1], argv[i + 2]);
+            i += 3;
+        } else if (!strcmp(argv[i], "align") && i + 1 < argc) {
+            align = strtoul(argv[i + 1], NULL, 0);
+            i += 2;
+        } else if (!strcmp(argv[i], "cluster") && i + 1 < argc) {
+            cluster = strtoul(argv[i + 1], NULL, 0);
+            i += 2;
         } else {
             fprintf(stderr, "ofimg: what is %s?\n", argv[i]);
             return 2;

@@ -22,15 +22,17 @@ static ofs_u32 rot32(ofs_u32 sum, ofs_u8 b) { return ((sum & 1) ? 0x80000000UL :
 
 int ofs_exfmt_layout(struct ofs_exfmt *f)
 {
-    ofs_u32 csz = f->cluster, spc, mb = f->sectors >> 11, len = 0, need, n;
+    ofs_u32 csz = f->cluster, spc, al, mb = f->sectors >> 11, len = 0, need, n;
     if (f->sectors < OFS_EXFMT_MINSECT || (f->nfats != 1 && f->nfats != 2) || f->label_len > 11) return -1;
     if (!csz) csz = mb <= 256 ? 4096UL : mb <= 32768UL ? 32768UL : 131072UL;
     for (f->cshift = 0; f->cshift < 16 && (512UL << f->cshift) < csz; ++f->cshift) ;
     if ((512UL << f->cshift) != csz) return -1;     /* a power of two, 512 bytes to 32 MB */
     spc = 1UL << f->cshift;
+    if (f->align & (f->align - 1)) return -1;
+    al = f->align > spc ? f->align : spc;
     f->fat_off = (24 + spc - 1) & ~(spc - 1);       /* FAT and heap on cluster boundaries */
     for (;;) {
-        f->heap = (f->fat_off + f->nfats * len + spc - 1) & ~(spc - 1);
+        f->heap = (f->fat_off + f->nfats * len + al - 1) & ~(al - 1);
         if (f->heap >= f->sectors) return -1;
         n = (f->sectors - f->heap) >> f->cshift;
         need = (n + 2 + 127) / 128;

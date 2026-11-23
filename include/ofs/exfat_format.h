@@ -23,6 +23,8 @@ struct ofs_exfmt {
     ofs_u32 serial;
     ofs_u16 label[11];                   /* UTF-16 */
     ofs_u8 label_len;
+    ofs_u32 align;                       /* the heap on a multiple of this many sectors (a
+                                            power of two, as mkfs.exfat's 1 MiB); 0: a cluster */
     /* by ofs_exfmt_layout */
     ofs_u8 cshift;                       /* sectors per cluster, as a shift */
     ofs_u32 fat_off, fat_len, heap;      /* sectors from the volume start */
