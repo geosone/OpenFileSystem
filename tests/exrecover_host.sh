@@ -15,6 +15,9 @@
 #   chain    last.bin's entry set deleted: its clusters, still marked in the
 #            bitmap, back as \LOST\FILE00001.CHK
 #   boot     the main boot sector wiped: the backup boot region taken
+#   deleted  (ofimg rm) "Long name C.dat" (fragmented), late.bin, and Sub 50
+#            with its two files deleted: with D they come back under
+#            \DELETED byte for byte, the rest as before
 # Then the 4K image as TexFAT (tests/exfat_texfat.py, either FAT active):
 #   intact, and fat1 (the active FAT wiped): everything back from the other
 # The image itself is never written (its checksum is compared).
@@ -23,7 +26,7 @@ set -eu
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
 dir=${1:-$ROOT/build/exrecover-host}
 rec=$ROOT/build/host/test_recover
-make -C "$ROOT" -s build/host/test_recover
+make -C "$ROOT" -s build/host/test_recover build/host/ofimg
 for t in python3; do command -v $t >/dev/null || { echo "SKIP: $t"; exit 0; }; done
 rm -rf "$dir"; mkdir -p "$dir"
 fail=0
@@ -78,15 +81,24 @@ print('%d-%d' % (s, s + 3))" "$1"
 for cl in 4K 512; do
 	sh "$ROOT/tests/exdefrag_image.sh" "$dir/$cl" 32 $cl >/dev/null
 	img=$dir/$cl/exfat.img files=$dir/$cl/files
-	for d in intact fat root bad chain boot; do
+	for d in intact fat root bad chain boot deleted; do
 		name="exFAT $cl $d"
 		cp "$img" "$dir/run.img"
 		bad=""
-		case $d in intact | bad) ;; *) damage "$dir/run.img" $d ;; esac
+		flags=SC
+		case $d in
+		intact | bad) ;;
+		deleted)
+			flags=SCD
+			"$ROOT/build/host/ofimg" "$dir/run.img" 0 rm "Folder with files/Sub 50/deep.txt" \
+				rm "Folder with files/Sub 50/data.bin" rm "Folder with files/Sub 50" \
+				rm "Folder with files/late.bin" rm "Long name C.dat" ;;
+		*) damage "$dir/run.img" $d ;;
+		esac
 		[ $d = bad ] && bad=$(heap_sectors "$dir/run.img")
 		sum=$(sha1sum <"$dir/run.img")
 		out=$dir/out; rm -rf "$out"; mkdir "$out"
-		"$rec" "$dir/run.img" "$out" SC $bad >"$dir/rec.txt" || { echo "FAILED: $name"; tail -5 "$dir/rec.txt"; fail=1; continue; }
+		"$rec" "$dir/run.img" "$out" $flags $bad >"$dir/rec.txt" || { echo "FAILED: $name"; tail -5 "$dir/rec.txt"; fail=1; continue; }
 		[ "$(sha1sum <"$dir/run.img")" = "$sum" ] || { echo "FAILED: $name wrote to the image"; fail=1; }
 		res=$(tail -1 "$dir/rec.txt")
 		find "$out" -type f -exec sha1sum {} + | cut -d' ' -f1 >"$dir/all.sums"
@@ -115,6 +127,15 @@ for cl in 4K 512; do
 				[ "$(stat -c %s "$files/$f")" = "$(stat -c %s "$out/$f")" ] || { echo "FAILED: $name: $f size"; exit 1; }
 			done || fail=1
 			echo "$res" | grep -q 'bad sectors [1-9]' || { echo "FAILED: $name: $res"; fail=1; } ;;
+		deleted)
+			for f in "Long name C.dat" "Folder with files/late.bin" "Folder with files/Sub 50/deep.txt" \
+				"Folder with files/Sub 50/data.bin"; do
+				cmp -s "$files/$f" "$out/DELETED/$f" || { echo "FAILED: $name: $f"; fail=1; }
+			done
+			diff -r -x DELETED -x "Sub 50" -x late.bin -x "Long name C.dat" "$files" "$out" >/dev/null ||
+				{ echo "FAILED: $name: the rest"; fail=1; }
+			echo "$res" | grep -q 'guessed 0, bad sectors 0, lost directories 0, lost chains 0, failed 0; undeleted [5-9], overwritten' ||
+				{ echo "FAILED: $name: $res"; fail=1; } ;;
 		chain)
 			[ ! -e "$out/last.bin" ] || { echo "FAILED: $name: last.bin still there"; fail=1; }
 			[ -f "$out/LOST/FILE00001.CHK" ] && cmp -s -n 40000 "$files/last.bin" "$out/LOST/FILE00001.CHK" ||

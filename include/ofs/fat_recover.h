@@ -22,7 +22,7 @@
      reach; each, with what is below it, goes to \LOST\DIRnnnnn;
    - with OFS_FATREC_CHAINS the chains in the FAT that nothing uses, as
      \LOST\FILEnnnnn.CHK;
-   - with OFS_FATREC_DELETED (FAT only), after the tree, its deleted files
+   - with OFS_FATREC_DELETED, after the tree, its deleted files
      and directories (E5h) as UNDELETE finds them: the first cluster from
      the entry, then the clusters after it that no FAT copy uses and
      nothing saved has taken; the long name from its parts (their order
@@ -39,7 +39,12 @@
    takes the clusters that begin with a whole file entry set of a right
    checksum, those reached from another such directory left out (they come
    with it).  CHAINS also saves the runs of clusters the allocation bitmap
-   marks used that nothing reached.
+   marks used that nothing reached.  DELETED takes the entry sets whose
+   in-use bits a deletion cleared (05h 40h 41h), whole and with a right
+   checksum; a deletion leaves the FAT chain and clears the bitmap, so a
+   file's clusters are its chain (NoFatChain: the run) while the bitmap
+   marks them free, else the free ones after; one whose first cluster the
+   bitmap marks used again is left out (overwritten).
    Paths handed to the caller are relative ("\DIR\FILE", UTF-8); names are
    made safe for FAT (control characters and \/:*?"<>| become _). */
 #include "ofs/types.h"
@@ -62,7 +67,7 @@
 
 #define OFS_FATREC_SCAN   1              /* search the data area for lost directories */
 #define OFS_FATREC_CHAINS 2              /* save the chains nothing uses */
-#define OFS_FATREC_DELETED 4             /* save the deleted files too (FAT), to \DELETED */
+#define OFS_FATREC_DELETED 4             /* save the deleted files too, to \DELETED */
 
 #define OFS_FATREC_MAXSECT 4096
 

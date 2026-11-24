@@ -21,6 +21,7 @@
 #define NOSEC    ((ofs_lba)-1)
 #define EOC      0xFFFFFFFFUL
 #define LOST     "\\LOST"
+#define DELETED  "\\DELETED"
 #define PATHMAX  1024
 
 static struct ofs_fatrec *R;
@@ -154,12 +155,15 @@ struct dir {
     ofs_u32 idx, clu;                    /* the cluster idx of it: clu */
 };
 
+/* the set's checksum; it was made with the in-use bits set, which a
+   deletion clears */
 static int set_sum_ok(const ofs_u8 *set, unsigned n)
 {
     ofs_u16 s = 0;
     unsigned i;
     for (i = 0; i < n * 32; ++i)
-        if (i != 2 && i != 3) s = (ofs_u16)(((s & 1) ? 0x8000u : 0) + (s >> 1) + set[i]);
+        if (i != 2 && i != 3)
+            s = (ofs_u16)(((s & 1) ? 0x8000u : 0) + (s >> 1) + (set[i] | (i & 31 ? 0 : 0x80)));
     return s == rd16(set + 2);
 }
 
@@ -239,13 +243,31 @@ static void walk(ofs_u32 first, ofs_u32 ncl, unsigned depth);
 /* a file to the target: its clusters (contiguous with NoFatChain), the
    bytes past valid as zeros.  A FAT chain that breaks goes on with the
    next cluster the bitmap marks used and nothing took yet. */
-static void save_file(ofs_u32 first, int nofat, ofs_fsize size, ofs_fsize vdl, ofs_u16 time, ofs_u16 date)
+/* cluster v free for a deleted file (del), else one in use: not taken by
+   anything saved, and the bitmap not saying otherwise */
+static int fits(ofs_u32 v, int del)
+{
+    return valid(v) && !bit(GOT, v) && (del ? allocated(v) != 1 : allocated(v) != 0);
+}
+
+static void make_dirs(void);
+
+static void save_file(ofs_u32 first, int nofat, ofs_fsize size, ofs_fsize vdl, ofs_u16 time, ofs_u16 date, int del)
 {
     ofs_u32 csize = 1UL << (sshift + cshift), n = size ? (ofs_u32)((size - 1) / csize + 1) : 0, k, c = first, v;
     ofs_fsize left = size, off = 0;
     ofs_lba lba;
     unsigned j, len, z;
     int guessed = 0, failed = 0;
+    if (del) {
+        if (n && !fits(first, 1)) {
+            ++R->overwritten;
+            say(OFS_FATREC_WARN, "%s: deleted, and its first cluster %lu is in use again: left out", path,
+                (unsigned long)first);
+            return;
+        }
+        make_dirs();
+    }
     if (R->create(R->ctx, path, size, time, date)) {
         ++R->failed;
         say(OFS_FATREC_ERROR, "%s: cannot be made on the target", path);
@@ -258,14 +280,17 @@ static void save_file(ofs_u32 first, int nofat, ofs_fsize size, ofs_fsize vdl, o
     for (k = 0; k < n && !failed; ++k) {
         if (k) {
             v = nofat ? c + 1 : next(c);
-            if (!nofat && (!valid(v) || bit(GOT, v))) {
+            /* a deleted file's clusters are free (its FAT chain is left,
+               the bitmap cleared); one in use again is skipped */
+            if (del ? !fits(v, 1) : !nofat && (!valid(v) || bit(GOT, v))) {
                 if (!guessed)
-                    say(OFS_FATREC_WARN, "%s: its chain breaks after %lu of %lu clusters; the rest taken from the clusters after",
+                    say(OFS_FATREC_WARN, del ? "%s: deleted, its clusters after %lu of %lu are in use again; the rest taken from the free ones after"
+                                             : "%s: its chain breaks after %lu of %lu clusters; the rest taken from the clusters after",
                         path, (unsigned long)k, (unsigned long)n);
                 guessed = 1;
-                /* the next cluster after it that the bitmap does not mark
-                   free and nothing else took */
-                for (v = c + 1; valid(v) && (bit(GOT, v) || allocated(v) == 0); ++v) ;
+                /* the next cluster after it that the bitmap marks free
+                   (deleted) or used, and nothing else took */
+                for (v = c + 1; valid(v) && !fits(v, del); ++v) ;
             }
             if (!valid(v)) {
                 say(OFS_FATREC_WARN, "%s: cut at the end of the volume", path);
@@ -301,7 +326,8 @@ static void save_file(ofs_u32 first, int nofat, ofs_fsize size, ofs_fsize vdl, o
         say(OFS_FATREC_ERROR, "%s: writing it on the target failed", path);
         return;
     }
-    ++R->files;
+    if (del) ++R->undeleted;
+    else ++R->files;
     if (guessed) ++R->guessed;
 }
 
@@ -381,7 +407,7 @@ static void walk_dir(struct dir *d, unsigned depth)
                 walk(sub, ncl, depth + 1);
             }
         } else if (!dry) {
-            save_file(sub, nofat, sub ? size : 0, sub ? vdl : 0, rd16(e + 12), rd16(e + 14));
+            save_file(sub, nofat, sub ? size : 0, sub ? vdl : 0, rd16(e + 12), rd16(e + 14), 0);
         }
         path[plen] = 0;
         dsec = NOSEC;
@@ -411,6 +437,166 @@ static void walk(ofs_u32 first, ofs_u32 ncl, unsigned depth)
     }
     d.first = first, d.ncl = ncl, d.idx = 0, d.clu = first;
     walk_dir(&d, depth);
+}
+
+/* ---- deleted files ---- */
+
+/* the directories above path on the target (they may be there already) */
+static void make_dirs(void)
+{
+    unsigned i;
+    char c;
+    for (i = 1; path[i]; ++i) {
+        if (path[i] != '\\') continue;
+        c = path[i];
+        path[i] = 0;
+        R->mkdir(R->ctx, path);
+        path[i] = c;
+    }
+}
+
+/* the first sector of cluster c holds directory entries only (an emptied
+   directory: deleted ones, or none) */
+static int dir_like(ofs_u32 c)
+{
+    unsigned i, k;
+    ofs_u8 t;
+    if (rsec(dbuf, &dsec, clu_lba(c))) return 0;
+    for (i = 0; i < ssize; i += 32) {
+        if (!(t = dbuf[i])) {
+            for (k = i; k < ssize; ++k) if (dbuf[k]) return 0;
+            return 1;
+        }
+        t &= 0x7F;
+        if (t != 0x01 && t != 0x02 && t != 0x03 && t != 0x05 && t != 0x20 && t != 0x21 && t != 0x22 && t != 0x40 &&
+            t != 0x41 && t != 0x60)
+            return 0;
+    }
+    return 1;
+}
+
+static void walk_del(ofs_u32 first, ofs_u32 ncl, ofs_u32 len, unsigned depth, int gone);
+
+/* A directory's deleted entry sets (gone: the directory was deleted
+   itself, all its sets are), to \DELETED with the directory's path.  A
+   deletion clears the in-use bit of each entry of the set (85h C0h C1h
+   become 05h 40h 41h) and the clusters in the bitmap; the FAT chain and
+   the name stay.  A deleted set is taken when it is whole (no entry of it
+   used again) and its checksum fits. */
+static void walk_dir_del(struct dir *d, unsigned depth, int gone)
+{
+    static ofs_u8 set_[19 * 32];
+    ofs_u8 *e = set_, in;
+    ofs_u32 pos, sub, ncl, csize = 1UL << (sshift + cshift);
+    unsigned plen = (unsigned)strlen(path), n, i, k, sc, nlen;
+    ofs_fsize size, vdl;
+    int r, del, nofat;
+    for (pos = 0;; ++pos) {
+        if (stopped()) return;
+        r = entry(d, pos, e);
+        if (!r) return;
+        if (r < 0) { pos |= (ssize / 32) - 1; continue; }
+        if (!e[0]) return;
+        if ((e[0] & 0x7F) != 0x05) continue;
+        in = e[0] & 0x80;
+        del = !in || gone;
+        sc = e[1];
+        if (sc < 2 || sc > 18) continue;
+        for (k = 1; k <= sc; ++k)
+            if (entry(d, pos + k, e + k * 32) != 1 || (e[k * 32] & 0x80) != in) break;
+        if (k <= sc || (e[32] & 0x7F) != 0x40) continue;
+        for (k = 2; k <= sc && (e[k * 32] & 0x7F) == 0x41; ++k) ;
+        nlen = e[35];
+        if (k == 2 || !nlen || (nlen + 14) / 15 > k - 2) continue;
+        if (!in && !set_sum_ok(e, sc + 1)) continue;
+        pos += sc;
+        nofat = e[33] & 2;
+        sub = e[33] & 1 ? rd32(e + 52) : 0;
+        size = rd64(e + 56);
+        vdl = rd64(e + 40);
+        if (vdl > size) vdl = size;
+        ncl = nofat ? (size ? (ofs_u32)((size - 1) / csize + 1) : 0) : 0;
+        if (!del && (!(e[4] & 0x10) || !valid(sub) || bit(MARK, sub) || depth >= MAXDEPTH)) continue;
+        n = plen;
+        if (n + 2 >= sizeof(path)) return;
+        path[n++] = '\\';
+        for (i = 0; i < nlen; ++i) put_utf8(path, &n, sizeof(path), rd16(e + 64 + (i / 15) * 32 + 2 + (i % 15) * 2));
+        path[n] = 0;
+        if (!del) {                      /* a live directory: for what is deleted below */
+            walk_del(sub, ncl, 0, depth + 1, 0);
+        } else if (e[4] & 0x10) {
+            if (!sub || !size) {
+                make_dirs();
+                if (R->mkdir(R->ctx, path)) ++R->failed;
+                else ++R->undeleted;
+            } else if (!fits(sub, 1) || !dir_like(sub)) {
+                say(OFS_FATREC_WARN, "%s: a deleted directory whose cluster is in use again, left out", path);
+                ++R->overwritten;
+            } else if (depth >= MAXDEPTH) {
+                say(OFS_FATREC_WARN, "%s: too deep, left out", path);
+            } else {
+                make_dirs();
+                walk_del(sub, ncl, (ofs_u32)((size - 1) / csize + 1), depth + 1, 1);
+            }
+        } else {
+            save_file(sub, nofat, sub ? size : 0, sub ? vdl : 0, rd16(e + 12), rd16(e + 14), 1);
+        }
+        path[plen] = 0;
+        dsec = NOSEC;
+    }
+}
+
+/* a directory in the pass for deleted sets.  A live one is marked (MARK,
+   against loops); a deleted one (gone) is made under \DELETED and its len
+   clusters taken (GOT): its FAT chain while the clusters are free, else
+   the free ones after it */
+static void walk_del(ofs_u32 first, ofs_u32 ncl, ofs_u32 len, unsigned depth, int gone)
+{
+    struct dir d;
+    ofs_u32 c, k, v;
+    if (gone) {
+        if (R->mkdir(R->ctx, path)) {
+            ++R->failed;
+            say(OFS_FATREC_ERROR, "%s: cannot be made on the target", path);
+            return;
+        }
+        ++R->undeleted;
+        if (ncl) {
+            for (k = 0; k < ncl && fits(first + k, 1); ++k) set(GOT, first + k);
+            ncl = k;
+        } else {
+            for (c = first, k = 0; k < len; ++k) {
+                set(GOT, c);
+                if (k + 1 == len) break;
+                v = next(c);
+                if (!fits(v, 1) || !dir_like(v)) break;
+                c = v;
+            }
+            /* no more than those (entry_lba goes on with the next cluster
+               only while it looks like entries) */
+            ncl = 0;
+        }
+    } else if (ncl) {
+        for (k = 0; k < ncl && valid(first + k); ++k) set(MARK, first + k);
+    } else {
+        for (c = first, k = 0; valid(c) && !bit(MARK, c) && k < MAXENT * 32 / (1UL << (sshift + cshift)) + 1; ++k) {
+            set(MARK, c);
+            c = next(c);
+        }
+    }
+    d.first = first, d.ncl = ncl, d.idx = 0, d.clu = first;
+    walk_dir_del(&d, depth, gone);
+}
+
+static int deleted(void)
+{
+    say(OFS_FATREC_INFO, "Looking for deleted files");
+    clear(MARK);
+    strcpy(path, DELETED);
+    if (valid(rootclu)) walk_del(rootclu, 0, 0, 0, 0);
+    path[0] = 0;
+    clear(MARK);                         /* the scan and CHAINS count with it from zero */
+    return stopped() ? OFS_FATREC_ESTOP : 0;
 }
 
 /* ---- the scan for lost directories ---- */
@@ -469,7 +655,7 @@ static void lost_file(ofs_u32 c, ofs_u32 n, int nofat, unsigned long *no)
     sprintf(path, LOST "\\FILE%05lu.CHK", ++*no);
     ++R->lost_chains;
     say(OFS_FATREC_INFO, "Lost clusters: %lu at %lu saved as %s", (unsigned long)n, (unsigned long)c, path);
-    save_file(c, nofat, sz, sz, 0, 0);
+    save_file(c, nofat, sz, sz, 0, 0, 0);
     path[0] = 0;
 }
 
@@ -544,7 +730,8 @@ int ofs_exfatrec_run(struct ofs_fatrec *r)
     r->bits = 0;
     r->files = r->dirs = r->bytes_lo = r->bytes_hi = r->guessed = r->bad = 0;
     r->lost_dirs = r->lost_chains = r->failed = 0;
-    r->from_backup = r->texfat = 0;
+    r->undeleted = r->overwritten = 0;
+    r->from_backup = r->texfat = r->searched = 0;
     dbuf = r->buf, fbuf = r->buf + OFS_FATREC_MAXSECT;
     dsec = fsec = NOSEC;
     ncand = lost_no = 0;
@@ -562,6 +749,7 @@ int ofs_exfatrec_run(struct ofs_fatrec *r)
     if (!valid(rootclu)) say(OFS_FATREC_WARN, "The root directory starts outside the volume");
     else walk(rootclu, 0, 0);
     if (stopped()) return OFS_FATREC_ESTOP;
+    if (r->flags & OFS_FATREC_DELETED && (rc = deleted()) != 0) return rc;
     if (r->flags & OFS_FATREC_SCAN && (rc = scan()) != 0) return rc;
     if (r->flags & OFS_FATREC_CHAINS && (rc = chains()) != 0) return rc;
     return 0;
