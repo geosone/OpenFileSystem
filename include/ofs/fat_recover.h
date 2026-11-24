@@ -3,7 +3,12 @@
 /* FAT12/16/32 and exFAT recovery for ORECOVER: the last attempt on a volume the
    check cannot repair.  It never writes to the volume; the files go to the
    caller (another drive).  What it takes:
-   - the boot sector, else the FAT32 backup (sector 6);
+   - the boot sector, else the FAT32 backup (sector 6), else (when the
+     caller gives the volume's size) the geometry searched for: the FATs
+     by their first two entries (F8 FF FF ...) and the distance between the
+     copies, the clusters by the "." entries of the directories (cluster
+     number and sector), FAT12 or FAT16 by the count of clusters, FAT32's
+     root at cluster 2;
    - the directory tree from the root: long names (when their checksum
      fits) or 8.3 names, every file with its size;
    - a cluster's FAT entry from the first copy that links it (a cluster or
@@ -57,6 +62,10 @@ struct ofs_fatrec {
     int (*read)(void *dev, ofs_lba lba, void OFS_FATREC_FAR *buf);    /* one sector */
     void *dev;
     ofs_lba start;                       /* first sector of the volume */
+    ofs_u32 sectors;                     /* its size in sectors (0: unknown): with it a
+                                            FAT volume without a boot sector is searched
+                                            for (ofs_fatrec_run) */
+    unsigned sector_size;                /* for that search (0: 512) */
     const ofs_u16 *cp;                   /* Unicode of the OEM characters 80h-FFh; 0: '_' */
     int flags;                           /* OFS_FATREC_SCAN, OFS_FATREC_CHAINS */
     /* the target: nonzero from any of them is an error the run counts in
@@ -84,6 +93,7 @@ struct ofs_fatrec {
     ofs_u32 failed;                      /* errors of the target */
     int from_backup;                     /* the boot sector was the backup */
     int texfat;                          /* exFAT with two FATs */
+    int searched;                        /* no boot sector: the geometry was searched for */
 };
 
 /* 0: done (the results tell); OFS_FATREC_EBAD, _EIO, _EMEM, _ESTOP. */

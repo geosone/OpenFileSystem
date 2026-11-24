@@ -15,6 +15,9 @@
 #   chain         a file's directory entry deleted, its chain left: the
 #                 chain back as \LOST\FILE00001.CHK, the file at its start
 #   boot (FAT32)  the boot sector wiped: the backup in sector 6 is taken
+#   noboot        the boot sector (FAT32: and its backup) wiped: the geometry
+#                 searched for (the FATs, the clusters by the "." entries),
+#                 everything back
 # The image itself is never written (its checksum is compared).
 #   tests/recover_host.sh [DIR]
 set -eu
@@ -59,6 +62,9 @@ elif kind == "root":
         wipe(g["rootsec"], g["heap"] - g["rootsec"])
 elif kind == "boot":
     wipe(0, 1)
+elif kind == "noboot":
+    wipe(0, 1)
+    if g["rootclu"]: wipe(6, 1)
 elif kind == "chain":
     # BIG.BIN's entry in the root deleted (0xE5), its FAT chain kept
     sec = g["rootsec"] if not g["rootclu"] else g["heap"] + (g["rootclu"] - 2) * g["spc"]
@@ -108,7 +114,7 @@ for kind in fat12 fat16 fat32; do
 		i=$((i + 1))
 	done
 	fsck.fat -n "$img" >/dev/null 2>&1 || { echo "FAILED: $kind image not clean"; fail=1; }
-	kinds="intact fat1 fats root bad chain"
+	kinds="intact fat1 fats root bad chain noboot"
 	[ $kind = fat32 ] && kinds="$kinds boot"
 	for d in $kinds; do
 		name="$kind $d"
@@ -122,7 +128,7 @@ for kind in fat12 fat16 fat32; do
 		[ "$(sha1sum <"$dir/run.img")" = "$sum" ] || { echo "FAILED: $name wrote to the image"; fail=1; }
 		res=$(tail -1 "$dir/rec.txt")
 		case $d in
-		intact | fat1 | boot)
+		intact | fat1 | boot | noboot)
 			diff -r "$files" "$out" >/dev/null || { echo "FAILED: $name"; diff -r "$files" "$out" | head -5; cat "$dir/rec.txt" | tail -3; fail=1; }
 			echo "$res" | grep -q 'guessed 0, bad sectors 0, lost directories 0, lost chains 0, failed 0' ||
 				{ echo "FAILED: $name: $res"; fail=1; } ;;

@@ -107,6 +107,8 @@ int main(int argc, char **argv)
     r.msg = msg;
     r.mem = at, r.memsize = MEM, r.block = 1UL << 30;
     r.buf = buf;
+    if (fseek(image, 0, SEEK_END) == 0) r.sectors = (ofs_u32)(ftell(image) / 512);
+    rewind(image);
     {
         unsigned char b[512];
         if (fread(b, 1, sizeof(b), image) == sizeof(b) && !memcmp(b + 3, "EXFAT   ", 8)) rc = ofs_exfatrec_run(&r);
@@ -115,6 +117,7 @@ int main(int argc, char **argv)
         else rc = ofs_fatrec_run(&r);
     }
     if (rc) { printf("not recovered: %d\n", rc); return 2; }
+    if (r.searched) printf("searched ");
     if (r.bits == 64) printf("exFAT%s", r.texfat ? " (TexFAT)" : ""); else printf("FAT%u", r.bits);
     printf(": %lu files, %lu directories, %lu bytes; guessed %lu, bad sectors %lu, lost directories %lu, "
            "lost chains %lu, failed %lu\n", (unsigned long)r.files, (unsigned long)r.dirs,

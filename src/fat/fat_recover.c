@@ -464,13 +464,133 @@ static int bpb_ok(const ofs_u8 *b)
            (rd16(b + 19) || rd32(b + 32)) && (rd16(b + 22) || rd32(b + 36));
 }
 
+/* the first sector of a FAT: entries 0 and 1 (the media byte, then ones);
+   32 when it is FAT32's, 1 FAT12/16's */
+static int fat_start(const ofs_u8 *b)
+{
+    if (!(b[0] == 0xF0 || b[0] >= 0xF8) || b[1] != 0xFF || b[2] != 0xFF) return 0;
+    if (b[3] == 0x0F && b[4] == 0xFF && b[5] == 0xFF && b[6] == 0xFF && (b[7] & 0x0F) == 0x0F) return 32;
+    return 1;
+}
+
+static int dot_dir(const ofs_u8 *e)
+{
+    return !memcmp(e, ".          ", 11) && e[11] & 0x10 && !memcmp(e + 32, "..         ", 11) && e[43] & 0x10;
+}
+
+#define MAXDOTS 16
+
+/* No boot sector: the geometry from what the volume holds (header) */
+static int search(void)
+{
+    ofs_u32 total = R->sectors, s, lim, fatk, rootsec0, l[MAXDOTS], cl[MAXDOTS], spc = 0, i, j, best = 0;
+    unsigned ndots = 0, kind = 0, k;
+    ofs_u32 cnt[8];
+    ssize = R->sector_size ? R->sector_size : 512;
+    if (ssize < 512 || ssize > OFS_FATREC_MAXSECT || !is_pow2(ssize) || total < 16) return OFS_FATREC_EBAD;
+    for (sshift = 9; (1u << sshift) < ssize; ++sshift) ;
+    /* the first FAT: within the first sectors (reserved ones before it) */
+    lim = total < 8192 ? total : 8192;
+    for (s = 1; s < lim; ++s) {
+        if (R->read(R->dev, R->start + s, dbuf)) continue;
+        if ((kind = (unsigned)fat_start(dbuf)) != 0) break;
+    }
+    if (s >= lim) return OFS_FATREC_EBAD;
+    fat0 = s;
+    /* the second copy: the next sector that starts the same way */
+    for (s = fat0 + 1; s < total / 2; ++s) {
+        if (stopped()) return OFS_FATREC_ESTOP;
+        if (!R->read(R->dev, R->start + s, dbuf) && (unsigned)fat_start(dbuf) == kind) break;
+    }
+    if (s >= total / 2) {
+        say(OFS_FATREC_ERROR, "No boot sector and only one FAT (sector %lu): its length is not known",
+            (unsigned long)fat0);
+        return OFS_FATREC_EBAD;
+    }
+    fatlen = s - fat0;
+    for (nfats = 2; nfats < 4; ++nfats) {
+        fatk = fat0 + nfats * fatlen;
+        if (fatk >= total || R->read(R->dev, R->start + fatk, dbuf) || (unsigned)fat_start(dbuf) != kind) break;
+    }
+    rootsec0 = fat0 + nfats * fatlen;
+    /* the directories' "." entries: the sector of a cluster's start */
+    lim = total - rootsec0 < 262144UL ? total - rootsec0 : 262144UL;
+    for (s = rootsec0; s < rootsec0 + lim && ndots < MAXDOTS; ++s) {
+        if (stopped()) return OFS_FATREC_ESTOP;
+        if (R->read(R->dev, R->start + s, dbuf) || !dot_dir(dbuf)) continue;
+        cl[ndots] = rd16(dbuf + 26) | (kind == 32 ? (ofs_u32)rd16(dbuf + 20) << 16 : 0);
+        l[ndots] = s;
+        if (cl[ndots] >= 2) ++ndots;
+    }
+    /* the sectors per cluster: what most pairs of them agree on */
+    for (k = 0; k < 8; ++k) cnt[k] = 0;
+    for (i = 0; i < ndots; ++i)
+        for (j = i + 1; j < ndots; ++j)
+            if (cl[j] > cl[i] && l[j] > l[i] && (l[j] - l[i]) % (cl[j] - cl[i]) == 0) {
+                ofs_u32 v = (l[j] - l[i]) / (cl[j] - cl[i]);
+                for (k = 0; k < 8; ++k) if (v == 1UL << k) ++cnt[k];
+            }
+    for (k = 0; k < 8; ++k) if (cnt[k] > best) best = cnt[k], spc = 1UL << k;
+    if (kind == 32) {
+        heap = rootsec0;
+        if (!spc)                         /* one directory: its distance from the heap */
+            for (i = 0; i < ndots && !spc; ++i)
+                if (cl[i] > 2 && l[i] > heap && (l[i] - heap) % (cl[i] - 2) == 0 &&
+                    is_pow2((l[i] - heap) / (cl[i] - 2)) && (l[i] - heap) / (cl[i] - 2) <= 128)
+                    spc = (l[i] - heap) / (cl[i] - 2);
+    } else {
+        if (!spc)                         /* one directory: the usual 512 root entries */
+            for (i = 0; i < ndots && !spc; ++i)
+                if (cl[i] > 2 && l[i] > rootsec0 + 32 && (l[i] - rootsec0 - 32) % (cl[i] - 2) == 0 &&
+                    is_pow2((l[i] - rootsec0 - 32) / (cl[i] - 2)) && (l[i] - rootsec0 - 32) / (cl[i] - 2) <= 128)
+                    spc = (l[i] - rootsec0 - 32) / (cl[i] - 2);
+        heap = 0;
+        for (i = 0; i < ndots && spc; ++i)
+            if (l[i] >= (cl[i] - 2) * spc + rootsec0 + 1) {
+                heap = l[i] - (cl[i] - 2) * spc;
+                break;
+            }
+        if (!heap) spc = 0;
+    }
+    if (!spc) {
+        say(OFS_FATREC_ERROR, "No boot sector, and no directory to measure the clusters by");
+        return OFS_FATREC_EBAD;
+    }
+    for (cshift = 0; (1UL << cshift) < spc; ++cshift) ;
+    rootsec = rootsec0;
+    rootsecs = kind == 32 ? 0 : heap - rootsec0;
+    if (heap >= total) return OFS_FATREC_EBAD;
+    nclu = (total - heap) >> cshift;
+    active = 0;
+    if (kind == 32) {
+        bits = 32;
+        rootclu = 2;
+        if (nclu > 0x0FFFFFF5UL) nclu = 0x0FFFFFF5UL;
+    } else {
+        bits = nclu < 4085 ? 12 : 16;
+        rootclu = 0;
+        if (nclu > 65524UL) nclu = 65524UL;
+    }
+    R->searched = 1;
+    say(OFS_FATREC_WARN,
+        "No FAT boot sector: FAT%u searched for, %u FATs of %lu sectors from sector %lu, "
+        "clusters of %lu sectors from sector %lu (%u directories measured)",
+        bits, nfats, (unsigned long)fatlen, (unsigned long)fat0, (unsigned long)spc, (unsigned long)heap, ndots);
+    return 0;
+}
+
 static int geometry(void)
 {
     const ofs_u8 *b = dbuf;
     ofs_u32 total, data;
+    int rc;
     if (R->read(R->dev, R->start, dbuf)) return OFS_FATREC_EIO;
     if (!bpb_ok(b)) {
-        if (R->read(R->dev, R->start + 6, dbuf) || !bpb_ok(b) || rd16(b + 22)) return OFS_FATREC_EBAD;
+        if (R->read(R->dev, R->start + 6, dbuf) || !bpb_ok(b) || rd16(b + 22)) {
+            if (!R->sectors) return OFS_FATREC_EBAD;
+            if ((rc = search()) != 0) return rc;
+            goto check;
+        }
         say(OFS_FATREC_WARN, "The boot sector is not FAT; using the backup in sector 6");
         R->from_backup = 1;
     }
@@ -499,6 +619,7 @@ static int geometry(void)
         if (nclu > 65524UL) nclu = 65524UL;
         if (!rootsecs) return OFS_FATREC_EBAD;
     }
+check:
     if ((((nclu + 2) * (bits / 4) + 1) / 2 + ssize - 1) >> sshift > fatlen) {
         say(OFS_FATREC_WARN, "The FAT is too small for %lu clusters; only those it holds", (unsigned long)nclu);
         nclu = (ofs_u32)(((fatlen << sshift) * 2) / (bits / 4)) - 2;
@@ -515,7 +636,7 @@ int ofs_fatrec_run(struct ofs_fatrec *r)
     r->bits = 0;
     r->files = r->dirs = r->bytes_lo = r->bytes_hi = r->guessed = r->bad = 0;
     r->lost_dirs = r->lost_chains = r->failed = 0;
-    r->from_backup = r->texfat = 0;
+    r->from_backup = r->texfat = r->searched = 0;
     dbuf = r->buf, fbuf = r->buf + OFS_FATREC_MAXSECT;
     dsec = fsec = NOSEC;
     ncand = lost_no = 0;
