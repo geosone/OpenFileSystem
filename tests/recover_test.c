@@ -102,7 +102,8 @@ int main(int argc, char **argv)
     mem = malloc(MEM);
     memset(&r, 0, sizeof(r));
     r.read = img_read;
-    r.flags = (strchr(f, 'S') ? OFS_FATREC_SCAN : 0) | (strchr(f, 'C') ? OFS_FATREC_CHAINS : 0);
+    r.flags = (strchr(f, 'S') ? OFS_FATREC_SCAN : 0) | (strchr(f, 'C') ? OFS_FATREC_CHAINS : 0) |
+              (strchr(f, 'D') ? OFS_FATREC_DELETED : 0);
     r.mkdir = t_mkdir, r.create = t_create, r.write = t_write, r.close = t_close;
     r.msg = msg;
     r.mem = at, r.memsize = MEM, r.block = 1UL << 30;
@@ -120,8 +121,11 @@ int main(int argc, char **argv)
     if (r.searched) printf("searched ");
     if (r.bits == 64) printf("exFAT%s", r.texfat ? " (TexFAT)" : ""); else printf("FAT%u", r.bits);
     printf(": %lu files, %lu directories, %lu bytes; guessed %lu, bad sectors %lu, lost directories %lu, "
-           "lost chains %lu, failed %lu\n", (unsigned long)r.files, (unsigned long)r.dirs,
+           "lost chains %lu, failed %lu", (unsigned long)r.files, (unsigned long)r.dirs,
            (unsigned long)r.bytes_lo, (unsigned long)r.guessed, (unsigned long)r.bad, (unsigned long)r.lost_dirs,
            (unsigned long)r.lost_chains, (unsigned long)r.failed);
+    if (strchr(f, 'D'))
+        printf("; undeleted %lu, overwritten %lu", (unsigned long)r.undeleted, (unsigned long)r.overwritten);
+    printf("\n");
     return 0;
 }

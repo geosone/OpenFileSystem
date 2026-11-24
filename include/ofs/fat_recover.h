@@ -21,7 +21,15 @@
      clusters of directories ("." and ".." entries) that the tree did not
      reach; each, with what is below it, goes to \LOST\DIRnnnnn;
    - with OFS_FATREC_CHAINS the chains in the FAT that nothing uses, as
-     \LOST\FILEnnnnn.CHK.
+     \LOST\FILEnnnnn.CHK;
+   - with OFS_FATREC_DELETED (FAT only), after the tree, its deleted files
+     and directories (E5h) as UNDELETE finds them: the first cluster from
+     the entry, then the clusters after it that no FAT copy uses and
+     nothing saved has taken; the long name from its parts (their order
+     on the disk) and the first character of the 8.3 name by the
+     checksum.  They go to \DELETED with their directory's path (mkdir
+     must succeed for a directory that is there already); one whose first
+     cluster is in use again is left out (overwritten).
    exFAT (ofs_exfatrec_run, src/exfat/exfat_recover.c) the same way: the
    main boot sector, else the backup boot region (sector 12); file entry
    sets whose checksum fits (one that does not is taken when its stream
@@ -54,6 +62,7 @@
 
 #define OFS_FATREC_SCAN   1              /* search the data area for lost directories */
 #define OFS_FATREC_CHAINS 2              /* save the chains nothing uses */
+#define OFS_FATREC_DELETED 4             /* save the deleted files too (FAT), to \DELETED */
 
 #define OFS_FATREC_MAXSECT 4096
 
@@ -91,6 +100,8 @@ struct ofs_fatrec {
     ofs_u32 bad;                         /* unreadable sectors (zeros) */
     ofs_u32 lost_dirs, lost_chains;      /* found by SCAN, CHAINS */
     ofs_u32 failed;                      /* errors of the target */
+    ofs_u32 undeleted;                   /* deleted files and directories saved (DELETED) */
+    ofs_u32 overwritten;                 /* deleted ones left out: their first cluster in use again */
     int from_backup;                     /* the boot sector was the backup */
     int texfat;                          /* exFAT with two FATs */
     int searched;                        /* no boot sector: the geometry was searched for */

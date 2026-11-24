@@ -15,6 +15,10 @@
 #   chain         a file's directory entry deleted, its chain left: the
 #                 chain back as \LOST\FILE00001.CHK, the file at its start
 #   boot (FAT32)  the boot sector wiped: the backup in sector 6 is taken
+#   deleted       BIG.BIN, a file with a long name and the directory SUB
+#                 deleted by mtools, recovered with D: all three under
+#                 \DELETED byte for byte (an 8.3 name without a long one
+#                 with _ for its lost first character), the rest as it was
 #   noboot        the boot sector (FAT32: and its backup) wiped: the geometry
 #                 searched for (the FATs, the clusters by the "." entries),
 #                 everything back
@@ -25,7 +29,7 @@ ROOT=$(cd "$(dirname "$0")/.." && pwd)
 dir=${1:-$ROOT/build/recover-host}
 rec=$ROOT/build/host/test_recover
 make -C "$ROOT" -s build/host/test_recover
-for t in mkfs.fat mcopy mmd mdel python3; do command -v $t >/dev/null || { echo "SKIP: $t"; exit 0; }; done
+for t in mkfs.fat mcopy mmd mdel mdeltree python3; do command -v $t >/dev/null || { echo "SKIP: $t"; exit 0; }; done
 export MTOOLS_SKIP_CHECK=1
 rm -rf "$dir"; mkdir -p "$dir"
 fail=0
@@ -114,17 +118,25 @@ for kind in fat12 fat16 fat32; do
 		i=$((i + 1))
 	done
 	fsck.fat -n "$img" >/dev/null 2>&1 || { echo "FAILED: $kind image not clean"; fail=1; }
-	kinds="intact fat1 fats root bad chain noboot"
+	kinds="intact fat1 fats root bad chain noboot deleted"
 	[ $kind = fat32 ] && kinds="$kinds boot"
 	for d in $kinds; do
 		name="$kind $d"
 		cp "$img" "$dir/run.img"
 		bad=""
-		case $d in intact | bad) ;; *) damage "$dir/run.img" $d ;; esac
+		flags=SC
+		case $d in
+		intact | bad) ;;
+		deleted)
+			flags=SCD
+			mdel -i "$dir/run.img" ::BIG.BIN "::Folder with a long name/A long file name.txt"
+			mdeltree -i "$dir/run.img" ::SUB ;;
+		*) damage "$dir/run.img" $d ;;
+		esac
 		[ $d = bad ] && bad=$(data_sectors "$dir/run.img")
 		sum=$(sha1sum <"$dir/run.img")
 		out=$dir/out; rm -rf "$out"; mkdir "$out"
-		"$rec" "$dir/run.img" "$out" SC $bad >"$dir/rec.txt" || { echo "FAILED: $name"; cat "$dir/rec.txt"; fail=1; continue; }
+		"$rec" "$dir/run.img" "$out" $flags $bad >"$dir/rec.txt" || { echo "FAILED: $name"; cat "$dir/rec.txt"; fail=1; continue; }
 		[ "$(sha1sum <"$dir/run.img")" = "$sum" ] || { echo "FAILED: $name wrote to the image"; fail=1; }
 		res=$(tail -1 "$dir/rec.txt")
 		case $d in
@@ -156,6 +168,18 @@ for kind in fat12 fat16 fat32; do
 				[ "$(stat -c %s "$files/$f")" = "$(stat -c %s "$out/$f")" ] || { echo "FAILED: $name: $f size"; exit 1; }
 			done || fail=1
 			echo "$res" | grep -q 'bad sectors [1-9]' || { echo "FAILED: $name: $res"; fail=1; } ;;
+		deleted)
+			# an 8.3 name without a long one has lost its first character (_)
+			for f in BIG.BIN:_IG.BIN "Folder with a long name/A long file name.txt:Folder with a long name/A long file name.txt" \
+				SUB/DATA.BIN:_UB/_ATA.BIN; do
+				g=${f#*:} f=${f%%:*}
+				[ ! -e "$out/$f" ] || { echo "FAILED: $name: $f still in the tree"; fail=1; }
+				cmp -s "$files/$f" "$out/DELETED/$g" || { echo "FAILED: $name: DELETED/$g"; ls -R "$out/DELETED" | head -20; fail=1; }
+			done
+			for f in README.TXT FRAG1.BIN FRAG2.BIN "Folder with a long name/Sub dir/Deep file.dat" "Many/Entry with a long name 7.txt"; do
+				cmp -s "$files/$f" "$out/$f" || { echo "FAILED: $name: $f"; fail=1; }
+			done
+			echo "$res" | grep -q 'failed 0; undeleted [1-9]' || { echo "FAILED: $name: $res"; fail=1; } ;;
 		chain)
 			[ ! -e "$out/BIG.BIN" ] || { echo "FAILED: $name: BIG.BIN still there"; fail=1; }
 			[ -f "$out/LOST/FILE00001.CHK" ] && cmp -s -n 40000 "$files/BIG.BIN" "$out/LOST/FILE00001.CHK" ||

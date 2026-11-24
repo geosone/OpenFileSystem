@@ -20,6 +20,7 @@
 #define MAXENT   65536UL                 /* entries of a directory (FAT's limit) */
 #define NOSEC    0xFFFFFFFFUL
 #define LOST     "\\LOST"
+#define DELETED  "\\DELETED"
 #define PATHMAX  1024
 
 static struct ofs_fatrec *R;
@@ -223,13 +224,42 @@ static ofs_u32 entry_lba(struct dir *d, ofs_u32 pos)
 
 static void walk(ofs_u32 first, unsigned depth);
 
-/* the clusters of a file to the target: n, the first, the size */
-static void save_file(ofs_u32 first, ofs_u32 size, ofs_u16 time, ofs_u16 date)
+/* a cluster no FAT copy uses and nothing saved has taken: where a deleted
+   file's data may still be */
+static int unused(ofs_u32 c) { return valid(c) && !bit(GOT, c) && next(c) == 0; }
+
+/* the directories above path on the target (they may be there already) */
+static void make_dirs(void)
+{
+    unsigned i;
+    char c;
+    for (i = 1; path[i]; ++i) {
+        if (path[i] != '\\') continue;
+        c = path[i];
+        path[i] = 0;
+        R->mkdir(R->ctx, path);
+        path[i] = c;
+    }
+}
+
+/* the clusters of a file to the target: n, the first, the size.  del: a
+   deleted file, whose chain is gone: the clusters after the first that no
+   FAT copy uses (as UNDELETE takes them) */
+static void save_file(ofs_u32 first, ofs_u32 size, ofs_u16 time, ofs_u16 date, int del)
 {
     ofs_u32 csize = 1UL << (sshift + cshift), n = size ? (size - 1) / csize + 1 : 0, k, c = first, v, left = size;
     ofs_u32 lba;
     unsigned j, len;
     int guessed = 0, failed = 0;
+    if (del) {
+        if (n && !unused(first)) {
+            ++R->overwritten;
+            say(OFS_FATREC_WARN, "%s: deleted, and its first cluster %lu is in use again: left out", path,
+                (unsigned long)first);
+            return;
+        }
+        make_dirs();
+    }
     if (R->create(R->ctx, path, (ofs_fsize)size, time, date)) {
         ++R->failed;
         say(OFS_FATREC_ERROR, "%s: cannot be made on the target", path);
@@ -240,7 +270,14 @@ static void save_file(ofs_u32 first, ofs_u32 size, ofs_u16 time, ofs_u16 date)
         n = 0;
     }
     for (k = 0; k < n && !failed; ++k) {
-        if (k) {
+        if (k && del) {
+            for (v = c + 1; valid(v) && !unused(v); ++v) ;
+            if (!valid(v)) {
+                say(OFS_FATREC_WARN, "%s: cut at the end of the volume", path);
+                break;
+            }
+            c = v;
+        } else if (k) {
             v = next(c);
             if (!valid(v) || bit(GOT, v)) {
                 if (!guessed)
@@ -276,7 +313,8 @@ static void save_file(ofs_u32 first, ofs_u32 size, ofs_u16 time, ofs_u16 date)
         say(OFS_FATREC_ERROR, "%s: writing it on the target failed", path);
         return;
     }
-    ++R->files;
+    if (del) ++R->undeleted;
+    else ++R->files;
     if (guessed) ++R->guessed;
 }
 
@@ -329,7 +367,7 @@ static void walk_dir(struct dir *d, unsigned depth)
             else if (depth >= MAXDEPTH) say(OFS_FATREC_WARN, "%s: too deep, left out", path);
             else walk(sub, depth + 1);
         } else {
-            save_file(sub, rd32(e + 28), rd16(e + 22), rd16(e + 24));
+            save_file(sub, rd32(e + 28), rd16(e + 22), rd16(e + 24), 0);
         }
         path[plen] = 0;
         dsec = NOSEC;
@@ -354,6 +392,181 @@ static void walk(ofs_u32 first, unsigned depth)
     }
     d.first = first, d.idx = 0, d.clu = first;
     walk_dir(&d, depth);
+}
+
+/* ---- deleted files ---- */
+
+static int is_dir_start(ofs_u32 c, ofs_u32 *parent);
+static void walk_del(ofs_u32 first, unsigned depth, int gone);
+
+/* the first cluster of entry e; FAT32's deletion may have cleared the high
+   half: then the first cluster with these low bits that nothing uses */
+static ofs_u32 del_first(const ofs_u8 *e)
+{
+    ofs_u32 c = rd16(e + 26) | (bits == 32 ? (ofs_u32)rd16(e + 20) << 16 : 0);
+    if (bits == 32 && !rd16(e + 20) && !unused(c))
+        for (c += 0x10000UL; valid(c) && !unused(c); c += 0x10000UL) ;
+    return c;
+}
+
+/* A directory's deleted entries (gone: the directory was deleted itself,
+   all its entries are), to \DELETED with the directory's path.  The long
+   name of a deleted entry has lost its order numbers (E5h in their place)
+   and the 8.3 name its first character: the parts are taken in their
+   order on the disk, and the first character is the one that makes the
+   checksum fit (the long name's first, else any). */
+static void walk_dir_del(struct dir *d, unsigned depth, int gone)
+{
+    ofs_u8 e[32];
+    ofs_u32 pos, lba, sub, p;
+    static const ofs_u8 offs[13] = {1, 3, 5, 7, 9, 14, 16, 18, 20, 22, 24, 28, 30};
+    unsigned plen = (unsigned)strlen(path), nparts = 0, nlfn = 0, n, i, k;
+    ofs_u8 sum = 0, dsum = 0, part[20][26];
+    int haslfn = 0, del;
+    for (pos = 0; pos < MAXENT; ++pos) {
+        if (stopped()) return;
+        if ((lba = entry_lba(d, pos)) == NOSEC) return;
+        if (rsec(dbuf, &dsec, lba)) {
+            pos |= (ssize / 32) - 1;
+            nparts = 0, haslfn = 0;
+            continue;
+        }
+        memcpy(e, dbuf + ((pos * 32) & (ssize - 1)), 32);
+        if (e[0] == 0) return;
+        del = e[0] == 0xE5 || gone;
+        if ((e[11] & 0x3F) == 0x0F) {    /* a long name part */
+            if (e[0] == 0xE5) {          /* deleted: in the disk's order, the last part first */
+                if (!nparts || e[13] != dsum) nparts = 0, dsum = e[13];
+                if (nparts < 20) {
+                    for (i = 0; i < 13; ++i) part[nparts][2 * i] = e[offs[i]], part[nparts][2 * i + 1] = e[offs[i] + 1];
+                    ++nparts;
+                }
+                haslfn = 0;
+            } else {                     /* a whole one (a live entry's, or in a deleted directory) */
+                unsigned seq = e[0] & 0x1F;
+                nparts = 0;
+                if (e[0] & 0x40) { haslfn = 1; nlfn = seq; sum = e[13]; memset(lfn, 0, sizeof(lfn)); }
+                if (!haslfn || !seq || seq > 20 || e[13] != sum) { haslfn = 0; continue; }
+                for (i = 0; i < 13; ++i) lfn[(seq - 1) * 13 + i] = rd16(e + offs[i]);
+            }
+            continue;
+        }
+        if (e[11] & 0x08 || (e[0] == '.' && (e[1] == ' ' || (e[1] == '.' && e[2] == ' ')))) {
+            nparts = 0, haslfn = 0;
+            continue;
+        }
+        if (haslfn && lfn_sum(e) != sum) haslfn = 0;
+        if (!del) {                      /* a live entry: only its directory, for what is deleted below */
+            sub = rd16(e + 26) | (bits == 32 ? (ofs_u32)rd16(e + 20) << 16 : 0);
+            if (e[11] & 0x10 && valid(sub) && !bit(LINKED, sub) && depth < MAXDEPTH) {
+                n = plen;
+                if (n + 2 >= sizeof(path)) return;
+                path[n++] = '\\';
+                if (haslfn) {
+                    for (i = 0; i < nlfn * 13 && lfn[i] && lfn[i] != 0xFFFF; ++i) put_utf8(path, &n, sizeof(path), lfn[i]);
+                    path[n] = 0;
+                } else {
+                    short_name(e, path + n, (unsigned)(sizeof(path) - n));
+                }
+                walk_del(sub, depth + 1, 0);
+                path[plen] = 0;
+                dsec = NOSEC;
+            }
+            nparts = 0, haslfn = 0;
+            continue;
+        }
+        /* the name of a deleted entry */
+        if (e[0] == 0xE5 && nparts) {     /* the long name from the parts, the last one first */
+            memset(lfn, 0, sizeof(lfn));
+            for (k = 0; k < nparts; ++k)
+                for (i = 0; i < 13; ++i) lfn[(nparts - 1 - k) * 13 + i] = rd16(part[k] + 2 * i);
+            nlfn = nparts;
+            haslfn = 0;
+            e[0] = (ofs_u8)(lfn[0] >= 'a' && lfn[0] <= 'z' ? lfn[0] - 32 : lfn[0] < 0x80 ? lfn[0] : '_');
+            if (lfn_sum(e) == dsum) haslfn = 1;
+            else
+                for (k = 0x21; k < 0x100 && !haslfn; ++k) {
+                    e[0] = (ofs_u8)k;
+                    if (k != 0xE5 && lfn_sum(e) == dsum) haslfn = 1;
+                }
+            if (!haslfn) e[0] = '_';
+        } else if (e[0] == 0xE5) {
+            e[0] = '_';
+        }
+        n = plen;
+        if (n + 2 >= sizeof(path)) return;
+        path[n++] = '\\';
+        if (haslfn) {
+            for (i = 0; i < nlfn * 13 && lfn[i] && lfn[i] != 0xFFFF; ++i) put_utf8(path, &n, sizeof(path), lfn[i]);
+            path[n] = 0;
+        } else {
+            short_name(e, path + n, (unsigned)(sizeof(path) - n));
+        }
+        nparts = 0, haslfn = 0;
+        sub = del_first(e);
+        if (e[11] & 0x10) {
+            /* a deleted directory: its first cluster still begins with "." */
+            if (unused(sub) && is_dir_start(sub, &p) && depth < MAXDEPTH) {
+                make_dirs();
+                walk_del(sub, depth + 1, 1);
+            } else {
+                say(OFS_FATREC_WARN, "%s: a deleted directory whose cluster is in use again, left out", path);
+                ++R->overwritten;
+            }
+        } else {
+            save_file(sub, rd32(e + 28), rd16(e + 22), rd16(e + 24), 1);
+        }
+        path[plen] = 0;
+        dsec = NOSEC;
+    }
+}
+
+/* a directory in the pass for deleted entries.  A live one is marked (its
+   clusters, against loops); a deleted one (gone) is made under \DELETED,
+   its clusters taken (its chain is gone: entry_lba goes on with the
+   clusters after it while they look like entries) */
+static void walk_del(ofs_u32 first, unsigned depth, int gone)
+{
+    struct dir d;
+    ofs_u32 c, k;
+    if (gone) {
+        if (R->mkdir(R->ctx, path)) {
+            ++R->failed;
+            say(OFS_FATREC_ERROR, "%s: cannot be made on the target", path);
+            return;
+        }
+        ++R->undeleted;
+        set(GOT, first);
+    } else {
+        for (c = first, k = 0; valid(c) && !bit(LINKED, c) && k < MAXENT * 32 / (1UL << (sshift + cshift)) + 1; ++k) {
+            set(LINKED, c);
+            c = next(c);
+        }
+    }
+    d.first = first, d.idx = 0, d.clu = first;
+    walk_dir_del(&d, depth, gone);
+}
+
+static int deleted(void)
+{
+    ofs_u32 off, len;
+    struct dir d;
+    say(OFS_FATREC_INFO, "Looking for deleted files");
+    strcpy(path, DELETED);
+    if (bits == 32) {
+        if (valid(rootclu)) walk_del(rootclu, 0, 0);
+    } else {
+        d.first = 0, d.idx = 0, d.clu = 0;
+        walk_dir_del(&d, 0, 0);
+    }
+    path[0] = 0;
+    /* LINKED marked the live directories here; CHAINS counts with it from zero */
+    for (off = 0; off < bmsize; off += len) {
+        len = R->block - ((LINKED + off) & (R->block - 1));
+        if (len > bmsize - off) len = bmsize - off;
+        FMEMSET(at(LINKED + off), 0, (unsigned)len);
+    }
+    return stopped() ? OFS_FATREC_ESTOP : 0;
 }
 
 /* ---- the scan for lost directories ---- */
@@ -447,7 +660,7 @@ static int chains(void)
         sprintf(path, LOST "\\FILE%05lu.CHK", ++no);
         ++R->lost_chains;
         say(OFS_FATREC_INFO, "A lost chain of %lu clusters at %lu saved as %s", (unsigned long)n, (unsigned long)c, path);
-        save_file(c, n * csize, 0, 0);
+        save_file(c, n * csize, 0, 0, 0);
         path[0] = 0;
     }
     return 0;
@@ -636,6 +849,7 @@ int ofs_fatrec_run(struct ofs_fatrec *r)
     r->bits = 0;
     r->files = r->dirs = r->bytes_lo = r->bytes_hi = r->guessed = r->bad = 0;
     r->lost_dirs = r->lost_chains = r->failed = 0;
+    r->undeleted = r->overwritten = 0;
     r->from_backup = r->texfat = r->searched = 0;
     dbuf = r->buf, fbuf = r->buf + OFS_FATREC_MAXSECT;
     dsec = fsec = NOSEC;
@@ -663,6 +877,7 @@ int ofs_fatrec_run(struct ofs_fatrec *r)
         walk_dir(&d, 0);
     }
     if (stopped()) return OFS_FATREC_ESTOP;
+    if (r->flags & OFS_FATREC_DELETED && (rc = deleted()) != 0) return rc;
     if (r->flags & OFS_FATREC_SCAN && (rc = scan()) != 0) return rc;
     if (r->flags & OFS_FATREC_CHAINS && (rc = chains()) != 0) return rc;
     return 0;
