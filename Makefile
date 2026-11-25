@@ -18,15 +18,16 @@ H        := $(BUILD)/host
 
 TESTBINS := $(H)/test_exfat $(H)/test_exfat_write $(H)/test_exchk $(H)/test_exfmt \
 	$(H)/test_fatchk $(H)/test_defrag $(H)/test_fat_format $(H)/test_part $(H)/test_fat_write $(H)/test_exfat_big \
-	$(H)/ofimg $(H)/test_ntfs $(H)/test_texfat_crash $(H)/test_exdefrag $(H)/test_recover
+	$(H)/ofimg $(H)/test_ntfs $(H)/test_texfat_crash $(H)/test_exdefrag $(H)/test_recover $(H)/test_lnk
 
 .PHONY: ntfs-check fuse fuse-check all test check dos-check clean
 all: $(TESTBINS)
 
 # quick tests without images
-test: $(H)/test_fat_format $(H)/test_exfat
+test: $(H)/test_fat_format $(H)/test_exfat $(H)/test_lnk
 	$(H)/test_fat_format
 	$(H)/test_exfat
+	$(H)/test_lnk
 
 # the host tests on images made by mkfs.fat/mkfs.exfat and the Linux drivers
 check: all test dos-check
@@ -76,6 +77,7 @@ $(H)/test_recover: tests/recover_test.c src/fat/fat_recover.c src/exfat/exfat_re
 $(H)/test_fat_format: tests/fat_format_test.c src/fat/fat_format.c $(HDR)
 $(H)/test_fat_write: tests/fat_write_test.c $(FATSRC) $(HDR)
 $(H)/test_part: tests/part_test.c src/part/part.c $(HDR)
+$(H)/test_lnk: tests/lnk_test.c src/lnk.c $(HDR)
 # TexFAT transactions against power failures (through the common interface)
 $(H)/test_texfat_crash: tests/texfat_crash_test.c src/vol.c src/exfat/exfat_check.c src/exfat/exfat_format.c $(EXFAT) $(HDR)
 $(H)/test_texfat_crash: CPPFLAGS += -DOFS_NO_FAT -DOFS_NO_NTFS -DOFS_NO_ISO -DOFS_NO_UDF

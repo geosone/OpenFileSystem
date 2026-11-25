@@ -18,6 +18,7 @@ add_library(openfilesystem_fat STATIC
   src/codepage.c
   src/latin.c
   src/name83.c
+  src/lnk.c
   src/exfat/exfat_format.c
   src/exfat/upcase.c
   src/fat/fat.c

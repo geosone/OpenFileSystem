@@ -306,6 +306,8 @@ const struct fs_driver ofs_gw_driver = {
 	statfs,
 #ifndef OFS_READONLY
 	setattr, settime,
+#else
+	NULL, NULL,
 #endif
 };
 
