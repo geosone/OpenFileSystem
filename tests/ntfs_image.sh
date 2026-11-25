@@ -8,9 +8,10 @@
 # file in so many pieces that its runs need an attribute list (viele.bin),
 # and compressed files (LZNT1) in KOMPR.  The files are
 # also kept in DIR/files for comparison.
-#   tests/ntfs_image.sh DIR [SIZE_MB [CLUSTER]]   -> DIR/ntfs.img
+# SECTOR: the bytes per sector the volume has (4096: as on a 4Kn disk).
+#   tests/ntfs_image.sh DIR [SIZE_MB [CLUSTER [SECTOR]]]   -> DIR/ntfs.img
 set -eu
-dir=$1; size=${2:-64}; cluster=${3:-4096}
+dir=$1; size=${2:-64}; cluster=${3:-4096}; sector=${4:-512}
 img=$dir/ntfs.img; files=$dir/files
 mkdir -p "$dir"
 rm -rf "$files" "$img"
@@ -32,7 +33,7 @@ for i in $(seq 1 150); do
 done
 
 truncate -s "${size}M" "$img"
-mkntfs -q -F -Q -c "$cluster" -L OPENASPI "$img" >/dev/null 2>&1
+mkntfs -q -F -Q -c "$cluster" -s "$sector" -L OPENASPI "$img" >/dev/null 2>&1
 loop=$(udisksctl loop-setup --no-user-interaction -f "$img" | sed -n 's/.* as \(\/dev\/[a-z0-9]*\)\.$/\1/p')
 trap 'udisksctl unmount --no-user-interaction -b "$loop" >/dev/null 2>&1 || true; udisksctl loop-delete --no-user-interaction -b "$loop" >/dev/null 2>&1 || true' EXIT
 udisksctl mount --no-user-interaction -b "$loop" >/dev/null
@@ -66,16 +67,19 @@ cp "$mnt/Langer Dateiname mit DOS.txt" "$files/"
 # files, the rest of the volume filled, every other small file deleted;
 # viele.bin then has to take the holes
 piece=$cluster; test "$piece" -ge 2048 || piece=2048
+# 600 runs fill an MFT record of 1 KB; mkntfs makes records of a sector
+# when sectors are larger
+n=$((600 * (sector > 1024 ? sector : 1024) / 1024))
 mkdir "$mnt/LOCH"
-for i in $(seq 1 600); do
+for i in $(seq 1 "$n"); do
     head -c "$piece" /dev/zero > "$mnt/LOCH/a$i"
     head -c "$piece" /dev/zero > "$mnt/LOCH/b$i"
 done
 free=$(df -B1 --output=avail "$mnt" | tail -1)
-fallocate -l $((free - 600 * piece - 1048576)) "$mnt/fill.bin" 2>/dev/null ||
-    head -c $((free - 600 * piece - 1048576)) /dev/zero > "$mnt/fill.bin"
+fallocate -l $((free - 1048576)) "$mnt/fill.bin" 2>/dev/null ||
+    head -c $((free - 1048576)) /dev/zero > "$mnt/fill.bin"
 rm "$mnt"/LOCH/b*
-head -c $((600 * piece)) /dev/urandom > "$mnt/viele.bin"
+head -c $((n * piece)) /dev/urandom > "$mnt/viele.bin"
 rm -r "$mnt/fill.bin" "$mnt/LOCH"
 cp "$mnt/viele.bin" "$files/viele.bin"
 mkdir "$mnt/KOMPR" "$files/KOMPR"

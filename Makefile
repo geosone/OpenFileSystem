@@ -82,6 +82,7 @@ $(H)/test_texfat_crash: CPPFLAGS += -DOFS_NO_FAT -DOFS_NO_NTFS -DOFS_NO_ISO -DOF
 $(H)/ofimg: tools/ofimg.c src/exfat/exfat_format.c $(EXFAT) $(HDR)
 $(H)/test_fat_write: CPPFLAGS += -DOFS_FAT_MAXSECT=4096
 $(H)/test_exfat_big: CPPFLAGS += -DOFS_EXFAT_MAXSECT=4096
+$(H)/test_ntfs $(H)/test_ntfs_asan $(H)/ofsfuse: CPPFLAGS += -DOFS_NTFS_MAXSECT=4096
 # a host program with 64-bit printf (the library is checked as C90 elsewhere)
 $(H)/test_exfat_big: CFLAGS := $(subst -std=c90,-std=c99,$(CFLAGS))
 $(H)/test_recover: CFLAGS := $(subst -std=c90,-std=c99,$(CFLAGS))

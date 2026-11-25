@@ -33,14 +33,34 @@
 static ofs_u16 rd16(const ofs_u8 *p) { return (ofs_u16)(p[0] | p[1] << 8); }
 static ofs_u32 rd32(const ofs_u8 *p) { return rd16(p) | (ofs_u32)rd16(p + 2) << 16; }
 
+/* The core counts in blocks of 512 bytes (the update sequence fixups do
+   too); a device sector of 1 << sshift bytes holds 1 << (sshift - 9) of
+   them.  buf holds one device sector, buf_lba its number. */
+
+/* block lba (512 bytes) through buf */
 static const ofs_u8 *sector(struct ofs_ntfs *v, ofs_lba lba)
 {
-    if (v->buf_lba != lba) {
+    unsigned sh = v->sshift - 9;
+    ofs_lba dev = lba >> sh;
+    if (v->buf_lba != dev) {
         v->buf_lba = NOBUF;
-        if (v->read(v->dev, v->start + lba, v->buf)) return 0;
-        v->buf_lba = lba;
+        if (v->read(v->dev, v->start + dev, v->buf)) return 0;
+        v->buf_lba = dev;
     }
-    return v->buf;
+    return v->buf + ((unsigned)(lba & ((1u << sh) - 1)) << 9);
+}
+
+/* block lba into b: straight from the device when its sectors are blocks */
+static int blk_read(struct ofs_ntfs *v, ofs_lba lba, ofs_u8 OFS_FAR *b)
+{
+    const ofs_u8 *s;
+    if (v->sshift == 9) {
+        if (v->buf_lba == lba) v->buf_lba = NOBUF;
+        return v->read(v->dev, v->start + lba, b) ? OFS_NTFS_EIO : OFS_NTFS_OK;
+    }
+    if (!(s = sector(v, lba))) return OFS_NTFS_EIO;
+    fmemcpy(b, s, 512);
+    return OFS_NTFS_OK;
 }
 
 /* ---- runlists ---- */
@@ -126,8 +146,7 @@ static int mft_raw(struct ofs_ntfs *v, ofs_u32 no)
     v->idx_no = NONE;
     for (i = 0; i < n; ++i) {
         if ((r = mft_sector(v, no * n + i, &lba))) return r;
-        if (v->buf_lba == lba) v->buf_lba = NOBUF;
-        if (v->read(v->dev, v->start + lba, v->idx + i * 512)) return OFS_NTFS_EIO;
+        if (blk_read(v, lba, v->idx + i * 512)) return OFS_NTFS_EIO;
     }
     if (memcmp(v->idx, "FILE", 4) || fixup(v->idx, v->rec_size) || !(rd16(v->idx + 0x16) & 1))
         return OFS_NTFS_EBAD;
@@ -171,8 +190,7 @@ static int mft_lookup(struct ofs_ntfs *v, ofs_u32 vcn)
             for (i = 0; i * 512 < len; ++i) {
                 if ((rc = attr_sector(v, la, i, &lba))) return rc;
                 if (lba == NOBUF) return OFS_NTFS_EBAD;
-                if (v->buf_lba == lba) v->buf_lba = NOBUF;
-                if (v->read(v->dev, v->start + lba, v->idx + i * 512)) return OFS_NTFS_EIO;
+                if (blk_read(v, lba, v->idx + i * 512)) return OFS_NTFS_EIO;
             }
             val = v->idx;
         } else if (!(val = res_value(l, &len))) break;
@@ -217,8 +235,7 @@ static int load_rec(struct ofs_ntfs *v, ofs_u32 no, ofs_u8 *b, ofs_u32 *cached)
     *cached = NONE;
     for (i = 0; i < n; ++i) {
         if ((r = mft_sector(v, s + i, &lba))) return r;
-        if (v->buf_lba == lba) v->buf_lba = NOBUF;
-        if (v->read(v->dev, v->start + lba, b + i * 512)) return OFS_NTFS_EIO;
+        if (blk_read(v, lba, b + i * 512)) return OFS_NTFS_EIO;
     }
     if (memcmp(b, "FILE", 4) || fixup(b, v->rec_size)) return OFS_NTFS_EBAD;
     if (!(rd16(b + 0x16) & 1)) return OFS_NTFS_END;            /* not in use */
@@ -302,7 +319,7 @@ static ofs_u32 rec_bytes(ofs_s8 c, unsigned cshift)
 static int stat_rec(struct ofs_ntfs *, ofs_u32, struct ofs_ntfs_ent *);
 
 int ofs_ntfs_mount(struct ofs_ntfs *v, ofs_ntfs_read_fn read, void *dev, ofs_lba start,
-                    const struct ofs_cp *cp, ofs_u8 *buf)
+                    unsigned sshift, const struct ofs_cp *cp, ofs_u8 *buf)
 {
     const ofs_u8 *b, *a, *val;
     ofs_u32 spc, rs, is, len, vcn, alen;
@@ -311,23 +328,25 @@ int ofs_ntfs_mount(struct ofs_ntfs *v, ofs_ntfs_read_fn read, void *dev, ofs_lba
     int rc;
     memset(v, 0, sizeof(*v));
     v->read = read; v->dev = dev; v->start = start; v->cp = cp;
+    v->sshift = (ofs_u8)(sshift ? sshift : 9);
+    if (v->sshift < 9 || (1UL << v->sshift) > OFS_NTFS_MAXSECT) return OFS_NTFS_ESIZE;
     v->rec = buf; v->rec2 = buf + OFS_NTFS_MAXREC; v->idx = buf + 2 * OFS_NTFS_MAXREC;
     v->buf = buf + 3 * OFS_NTFS_MAXREC;
     v->buf_lba = NOBUF; v->rec_no = v->rec2_no = v->idx_no = NONE; v->free = NONE;
     if (!(b = sector(v, 0))) return OFS_NTFS_EIO;
     if (!ofs_ntfs_probe(b)) return OFS_NTFS_EBAD;
-    if (rd16(b + 0x0B) != 512) return OFS_NTFS_ESIZE;
+    if (rd16(b + 0x0B) != 1u << v->sshift) return OFS_NTFS_ESIZE;
     spc = b[0x0D];
     if (spc > 0x80) spc = 1UL << (256 - spc);
     for (i = 0; i < 16 && (1UL << i) != spc; ++i) ;
     if (i == 16) return OFS_NTFS_EBAD;
-    v->cshift = (ofs_u8)i;
+    v->cshift = (ofs_u8)(i + v->sshift - 9);   /* blocks per cluster */
     rs = rec_bytes((ofs_s8)b[0x40], v->cshift);
     is = rec_bytes((ofs_s8)b[0x44], v->cshift);
     if (rs < 1024 || rs > OFS_NTFS_MAXREC || (rs & 511) || is < 512 || is > OFS_NTFS_MAXREC || (is & 511))
         return OFS_NTFS_ESIZE;
     v->rec_size = (ofs_u16)rs; v->idx_size = (ofs_u16)is;
-    v->clusters = (rd32(b + 0x2C) ? NONE : rd32(b + 0x28)) >> v->cshift;
+    v->clusters = (rd32(b + 0x2C) ? NONE : rd32(b + 0x28)) >> i;   /* device sectors */
     v->serial = rd32(b + 0x48);
     /* $MFT's first run from the boot sector, then its own runlist */
     v->mft[0].vcn = 0; v->mft[0].len = (rs + (512UL << v->cshift) - 1) >> (9 + v->cshift);
@@ -402,8 +421,7 @@ static int ext_attr(struct ofs_ntfs *v, ofs_u32 no, ofs_u32 type, int i30, ofs_u
         for (i = 0; i * 512 < len; ++i) {
             if ((rc = attr_sector(v, l, i, &lba))) return rc;
             if (lba == NOBUF) return OFS_NTFS_EBAD;
-            if (v->buf_lba == lba) v->buf_lba = NOBUF;
-            if (v->read(v->dev, v->start + lba, v->idx + i * 512)) return OFS_NTFS_EIO;
+            if (blk_read(v, lba, v->idx + i * 512)) return OFS_NTFS_EIO;
         }
         val = v->idx;
     } else if (!(val = res_value(l, &len))) return OFS_NTFS_EBAD;
@@ -536,8 +554,7 @@ static int comp_chunk(struct ofs_ntfs *v, struct ofs_ntfs_file *f, ofs_u32 k)
         for (j = 0; j < CHUNK / 512; ++j) {
             sec = k * (CHUNK / 512) + j;
             lba = ((ofs_lba)lcn[sec >> v->cshift] << v->cshift) + (sec & ((1UL << v->cshift) - 1));
-            if (v->buf_lba == lba) v->buf_lba = NOBUF;
-            if (v->read(v->dev, v->start + lba, v->idx + j * 512)) return OFS_NTFS_EIO;
+            if (blk_read(v, lba, v->idx + j * 512)) return OFS_NTFS_EIO;
         }
     } else {
         c.v = v; c.lcn = lcn; c.pos = 0; c.end = (ofs_u32)nalloc << (v->cshift + 9); c.s = 0; c.spos = 0;
@@ -604,8 +621,7 @@ int ofs_ntfs_read(struct ofs_ntfs *v, struct ofs_ntfs_file *f, ofs_fsize off, vo
             } else {
                 lba = ((ofs_lba)(f->clu + (vcn - f->idx)) << v->cshift) + (sec & ((1UL << v->cshift) - 1));
                 if (!in && n == 512) {
-                    if (v->buf_lba == lba) v->buf_lba = NOBUF;
-                    if (v->read(v->dev, v->start + lba, out)) return OFS_NTFS_EIO;
+                    if (blk_read(v, lba, out)) return OFS_NTFS_EIO;
                 } else {
                     if (!(s = sector(v, lba))) return OFS_NTFS_EIO;
                     fmemcpy(out, s + in, n);
@@ -712,8 +728,7 @@ static int load_idx(struct ofs_ntfs *v, ofs_u32 dir, ofs_u32 k)
     }
     v->idx_no = NONE;
     for (i = 0; i < n; ++i) {
-        if (v->buf_lba == lbas[i]) v->buf_lba = NOBUF;
-        if (v->read(v->dev, v->start + lbas[i], v->idx + i * 512)) return OFS_NTFS_EIO;
+        if (blk_read(v, lbas[i], v->idx + i * 512)) return OFS_NTFS_EIO;
     }
     if (memcmp(v->idx, "INDX", 4) || fixup(v->idx, v->idx_size)) return OFS_NTFS_EBAD;
     v->idx_dir = dir; v->idx_no = k;
@@ -828,8 +843,7 @@ static int each_fname(struct ofs_ntfs *v, ofs_u32 no, fname_fn fn, void *ctx)
         for (i = 0; i * 512 < len; ++i) {
             if ((rc = attr_sector(v, l, i, &lba))) return rc;
             if (lba == NOBUF) return OFS_NTFS_EBAD;
-            if (v->buf_lba == lba) v->buf_lba = NOBUF;
-            if (v->read(v->dev, v->start + lba, v->idx + i * 512)) return OFS_NTFS_EIO;
+            if (blk_read(v, lba, v->idx + i * 512)) return OFS_NTFS_EIO;
         }
         val = v->idx;
     } else if (!(val = res_value(l, &len))) return OFS_NTFS_EBAD;

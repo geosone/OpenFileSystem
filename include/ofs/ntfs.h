@@ -8,11 +8,17 @@
    directory index ($INDEX_ROOT, $INDEX_ALLOCATION with its $BITMAP),
    compressed files (LZNT1, decompressed in idx 4 KB at a time).
    Encrypted files are not read (OFS_NTFS_ECOMP).
-   Sectors of 512 bytes only.  The interface follows exfat.h, so the DOS
+   Device sectors of 512 bytes up to OFS_NTFS_MAXSECT (4096 for 4Kn
+   disks).  The interface follows exfat.h, so the DOS
    redirector of EXFAT.SYS can serve NTFS too. */
 #include "ofs/codepage.h"
 
 #define OFS_NTFS_MAXREC 4096     /* MFT record and index block size */
+#ifndef OFS_NTFS_MAXSECT
+#define OFS_NTFS_MAXSECT 512     /* the largest device sector */
+#endif
+/* the buffer ofs_ntfs_mount wants */
+#define OFS_NTFS_BUF (OFS_NTFS_MAXREC * 3 + OFS_NTFS_MAXSECT)
 
 #define OFS_NTFS_OK      0
 #define OFS_NTFS_END     1       /* end of directory */
@@ -39,7 +45,8 @@ struct ofs_ntfs {
     ofs_ntfs_read_fn read;
     void *dev;
     ofs_lba start;               /* first sector of the volume */
-    ofs_u8 cshift;               /* sectors per cluster, a shift */
+    ofs_u8 sshift;               /* device sector size, a shift (9-12) */
+    ofs_u8 cshift;               /* 512-byte blocks per cluster, a shift */
     ofs_u16 rec_size, idx_size;  /* MFT record, index block: bytes */
     ofs_u32 clusters;            /* of the volume */
     ofs_u32 serial;
@@ -55,11 +62,11 @@ struct ofs_ntfs {
        miss reads $MFT's runlist again) */
     ofs_u8 mft_nruns, mft_next, mft_busy;
     struct ofs_ntfs_run mft[OFS_NTFS_MFTRUNS];
-    /* buffers of the caller: a sector (512 bytes) and three of
+    /* buffers of the caller: a device sector and three of
        OFS_NTFS_MAXREC: MFT records (two: a directory and its entries)
        and an index block */
     ofs_u8 *buf, *rec, *rec2, *idx;
-    ofs_lba buf_lba;             /* sector in buf, or all ones */
+    ofs_lba buf_lba;             /* device sector in buf, or all ones */
     ofs_u32 rec_no, rec2_no, idx_no;   /* what they hold, or all ones */
     ofs_u32 idx_dir;             /* the directory of idx */
 };
@@ -85,9 +92,10 @@ struct ofs_ntfs_ent {
 };
 
 int ofs_ntfs_probe(const ofs_u8 OFS_FAR *boot);
-/* buf: OFS_NTFS_MAXREC * 3 + 512 bytes */
+/* buf: OFS_NTFS_BUF bytes. sshift: the device's sector size (0: 512);
+   the boot sector's bytes per sector must match it. */
 int ofs_ntfs_mount(struct ofs_ntfs *, ofs_ntfs_read_fn, void *dev, ofs_lba start,
-                    const struct ofs_cp *, ofs_u8 *buf);
+                    unsigned sshift, const struct ofs_cp *, ofs_u8 *buf);
 void ofs_ntfs_rootdir(const struct ofs_ntfs *, struct ofs_ntfs_file *);
 /* The next entry of a directory from *pos (0: the first): system files
    ($MFT ...) and DOS-only names (the 8.3 twin of a long name) are left out.

@@ -71,7 +71,7 @@ struct ofs_host {
 #if !defined(OFS_NO_UDF)
 #define OFS_VOL_BUF OFS_UDF_BUF   /* 16 KiB, more than NTFS's */
 #elif !defined(OFS_NO_NTFS)
-#define OFS_VOL_BUF (OFS_NTFS_MAXREC * 3 + 512)
+#define OFS_VOL_BUF OFS_NTFS_BUF
 #else
 #define OFS_VOL_BUF 4096          /* also ISO 9660's OFS_ISO_BUF */
 #endif

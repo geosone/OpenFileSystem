@@ -305,7 +305,7 @@ static const struct ofs_fs fs_exfat = {
 static int nt_mount(struct ofs_vol *v, ofs_lba start, const struct ofs_cp *cp, ofs_u8 *buf)
 {
     struct ofs_ntfs *x = &v->u.ntfs;
-    int r = ofs_ntfs_mount(x, (ofs_ntfs_read_fn)v->host.read, v->dev, start, cp, buf);
+    int r = ofs_ntfs_mount(x, (ofs_ntfs_read_fn)v->host.read, v->dev, start, v->host.sshift, cp, buf);
     if (r) return r == OFS_NTFS_ECOMP ? OFS_ENOTSUP : r;
     x->tz = v->host.tz;
     v->type = "NTFS";

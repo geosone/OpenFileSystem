@@ -1,13 +1,16 @@
 #!/bin/sh
 # The NTFS reader on images of tests/ntfs_image.sh (clusters of 4 KB and
-# 512 bytes): every file read through 8.3 names equals the original, the
+# 512 bytes on 512-byte sectors, and a volume of 4096-byte sectors as on a
+# 4Kn disk): every file read through 8.3 names equals the original, the
 # listing has every name; compressed files too.
 set -eu
 cd "$(dirname "$0")/.."
 T=build/host/test_ntfs
-for c in 4096 512; do
-    d=build/ntfs-$c
-    sh tests/ntfs_image.sh "$d" 64 "$c" >/dev/null
+for v in 4096:512 512:512 4096:4096; do
+    c=${v%:*}; s=${v#*:}
+    d=build/ntfs-$c; test "$s" = 512 || d=$d-s$s
+    export NTFS_SECTOR=$s
+    sh tests/ntfs_image.sh "$d" 64 "$c" "$s" >/dev/null
     "$T" "$d/ntfs.img" > "$d/list.txt" 2>/dev/null
     short() {   # the 8.3 name the listing of directory $1 (8.3 path) gives long name $2
         "$T" "$d/ntfs.img" ${1:+0 "$1\\"} 2>/dev/null | awk -v n="$2" '
@@ -39,5 +42,5 @@ for c in 4096 512; do
     check 'KOMPR\ZAHLEN.TXT' KOMPR/zahlen.txt
     check 'KOMPR\ZUFALL.BIN' KOMPR/zufall.bin
     check 'KOMPR\GEMISCHT.BIN' KOMPR/gemischt.bin
-    echo "NTFS reading with $c-byte clusters passed"
+    echo "NTFS reading with $c-byte clusters on $s-byte sectors passed"
 done

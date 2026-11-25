@@ -164,8 +164,10 @@ core directly.
 
 - **A new file system** (ISO 9660, UDF): one core with an `ofs_fs_ops`
   table. DOS, GonWare and the tools serve it at once.
-- **4 KB sectors**: the core reads `vol->sector_size` instead of assuming
-  512. NTFS is the only core that still assumes 512 today. Every host
+- **4 KB sectors**: the core reads the host's sector size (`sshift`)
+  instead of assuming 512. NTFS was the last core to assume 512; since
+  2026-11-25 it counts in 512-byte blocks (as its fixups do) and splits
+  the device's sectors into them, up to `OFS_NTFS_MAXSECT`. Every host
   benefits at once.
 - **NTFS writing in stages**: `caps` grows step by step:
   1. overwrite in place, no size change;

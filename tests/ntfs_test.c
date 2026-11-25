@@ -19,15 +19,17 @@
 static FILE *image;
 static unsigned long reads;
 
+static unsigned sshift = 9;
+
 static int img_read(void *dev, ofs_lba lba, void *buf)
 {
     (void)dev; ++reads;
-    if (fseek(image, (long)lba * 512, SEEK_SET)) return -1;
-    return fread(buf, 512, 1, image) == 1 ? 0 : -1;
+    if (fseek(image, (long)lba << sshift, SEEK_SET)) return -1;
+    return fread(buf, 1u << sshift, 1, image) == 1 ? 0 : -1;
 }
 
 static struct ofs_ntfs vol;
-static ofs_u8 sector_buf[OFS_NTFS_MAXREC * 3 + 512];
+static ofs_u8 sector_buf[OFS_NTFS_BUF];
 
 static void name83(const char fcb[11], char *out)
 {
@@ -203,7 +205,11 @@ int main(int argc, char **argv)
     if (argc < 2) { fprintf(stderr, "usage: ntfs_test IMAGE [LBA [PATH]]\n"); return 2; }
     image = fopen(argv[1], "rb");
     assert(image);
-    r = ofs_ntfs_mount(&vol, img_read, NULL, start, test_cp(850), sector_buf);
+    if (getenv("NTFS_SECTOR")) {           /* the image's sector size */
+        unsigned long ss = strtoul(getenv("NTFS_SECTOR"), NULL, 0);
+        for (sshift = 9; (1UL << sshift) < ss; ++sshift) ;
+    }
+    r = ofs_ntfs_mount(&vol, img_read, NULL, start, sshift, test_cp(850), sector_buf);
     if (r) { fprintf(stderr, "mount: %d\n", r); return 1; }
     if (argc > 3 && !strcmp(argv[3], "--dump")) {
         ofs_ntfs_rootdir(&vol, &root);
