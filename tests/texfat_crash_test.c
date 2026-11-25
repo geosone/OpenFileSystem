@@ -42,7 +42,7 @@ static int wr(void *dev, ofs_lba lba, const void *buf)
     return 0;
 }
 
-static int fmt_wr(void *dev, ofs_u32 lba, unsigned count, const void *buf)
+static int fmt_wr(void *dev, ofs_lba lba, unsigned count, const void *buf)
 {
     (void)dev;
     memcpy(disk + (unsigned long)lba * 512, buf, count * 512UL);

@@ -1,24 +1,27 @@
 /* The exFAT formatting on the host, as EXFMT does it under DOS:
    exfmt_test IMAGE [CLUSTER [NFATS [LABEL [BAD...]]]]
    formats the whole image file; CLUSTER in bytes (0: by size), NFATS 2:
-   TexFAT, LABEL in ASCII ("" none), BAD: bad cluster numbers, ascending. */
+   TexFAT, LABEL in ASCII ("" none), BAD: bad cluster numbers, ascending.
+   SECTOR=4096 (512 to 4096) in the environment: sectors of that size. */
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include "ofs/exfat_format.h"
 
 static FILE *image;
+static unsigned bps = 512;
 
-static int img_write(void *dev, ofs_u32 lba, unsigned count, const void *buf)
+static int img_write(void *dev, ofs_lba lba, unsigned count, const void *buf)
 {
     (void)dev;
-    if (fseek(image, (long)lba * 512, SEEK_SET)) return -1;
-    return fwrite(buf, 512, count, image) == count ? 0 : -1;
+    if (fseek(image, (long)lba * (long)bps, SEEK_SET)) return -1;
+    return fwrite(buf, bps, count, image) == count ? 0 : -1;
 }
 
 int main(int argc, char **argv)
 {
-    static ofs_u8 buf[16 * 512];
+    static ofs_u8 buf[16 * 4096];
+    const char *sector = getenv("SECTOR");
     ofs_u32 bad[OFS_EXFMT_MAXBAD];
     struct ofs_exfmt f;
     unsigned nbad = 0, i;
@@ -27,8 +30,11 @@ int main(int argc, char **argv)
     image = fopen(argv[1], "r+b");
     if (!image) { perror(argv[1]); return 2; }
     memset(&f, 0, sizeof(f));
+    if (sector) bps = (unsigned)atoi(sector);
+    for (f.sshift = 9; f.sshift < 12 && (1U << f.sshift) < bps; ++f.sshift) ;
+    if ((1U << f.sshift) != bps) { fputs("SECTOR: 512, 1024, 2048 or 4096\n", stderr); return 2; }
     fseek(image, 0, SEEK_END);
-    f.sectors = (ofs_u32)(ftell(image) / 512);
+    f.sectors = (ofs_u32)(ftell(image) / (long)bps);
     f.cluster = argc > 2 ? strtoul(argv[2], NULL, 0) : 0;
     f.nfats = argc > 3 ? (ofs_u8)atoi(argv[3]) : 1;
     f.serial = 0x12345678UL;
@@ -37,7 +43,7 @@ int main(int argc, char **argv)
     if (ofs_exfmt_layout(&f)) { puts("no exFAT layout for this size"); return 1; }
     printf("%lu sectors: FAT at %lu (%lu sectors, %u), heap at %lu, %lu clusters of %lu bytes\n",
            (unsigned long)f.sectors, (unsigned long)f.fat_off, (unsigned long)f.fat_len, f.nfats,
-           (unsigned long)f.heap, (unsigned long)f.clusters, 512UL << f.cshift);
+           (unsigned long)f.heap, (unsigned long)f.clusters, (unsigned long)bps << f.cshift);
     r = ofs_exfmt_write(&f, img_write, 0, bad, nbad, buf, 16);
     if (r) { printf(r == -2 ? "no room for the system clusters\n" : "write error\n"); return 1; }
     printf("bitmap %lu, %lu; up-case table %lu; root %lu\n", (unsigned long)f.bitmap_first[0],

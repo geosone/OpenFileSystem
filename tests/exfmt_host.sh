@@ -42,6 +42,13 @@ want=65536;  case_ 1000 65536 1 ''
 want=512;    case_ 64 512 2 KLEIN
 want=4096;   case_ 64 0 1 BAD 2 3 5 1000 16000
 want=4096;   case_ 64 0 2 BAD2 2 4 6 7 16350
+# 4096-byte sectors (512e/4Kn disks): fsck.exfat reads the sector size from
+# the boot sector
+SECTOR=4096; export SECTOR
+want=4096;   case_ 64 0 1 VIERK
+want=32768;  case_ 2000 0 1 ''
+want=65536;  case_ 300 65536 2 TEX4K
+unset SECTOR
 # a cluster size the volume has no room for, and a volume below 1 MB
 truncate -s 1M "$dir/t.img"
 if "$fmt" "$dir/t.img" 33554432 1 > /dev/null; then echo "FAILED: 32 MB clusters on 1 MB"; fail=1; fi

@@ -8,7 +8,9 @@ int main(int argc,char **argv)
 {
     static const ofs_u32 sizes[]={1440,2880,5760,8192,8400,196608,246528,489532,4190208};
     struct ofs_fat_layout f;
-    unsigned char b[514];
+    unsigned char b[4098];
+    const char *sector=getenv("SECTOR");
+    long bps=sector ? atol(sector) : 512;
     unsigned i;
     ofs_u32 data,needed,n;
     FILE *file;
@@ -48,6 +50,29 @@ int main(int argc,char **argv)
         assert(ofs_fat_layout(&f,4194304UL,0));     /* FAT16 still ends there */
         assert(ofs_fat_layout32(&f,0xFFFFFFFFUL,1)); /* hidden + total overflow */
     }
+    /* 4096-byte sectors: FAT32 to 2^32-1 of them (16 TiB) with clusters of
+     * up to 64 KiB, the BPB says 4096; FAT12/16 still end at 2 GiB */
+    {
+        static const ofs_u32 big[]={70000UL,1048576UL,4194304UL,8388608UL,0xFFFFFFFFUL};
+        static const unsigned spc[]={1,1,2,4,16};
+        for(i=0;i<sizeof(big)/sizeof(big[0]);++i) {
+            assert(!ofs_fat_layout_bps(&f,big[i],0,4096,1));
+            assert(f.bits==32 && f.bps==4096 && f.spc==spc[i]);
+            assert(f.clusters>=65525 && f.clusters<0x0FFFFFF5UL);
+            assert(f.clusters==(f.sectors-f.reserved-2UL*f.fat_sectors)/f.spc);
+            assert((f.clusters+2+1023)/1024<=f.fat_sectors);
+            memset(b,0xA5,sizeof(b)); ofs_fat_boot(&f,1,b+1);
+            assert(b[0]==0xA5 && b[4097]==0xA5 && le16(b+12)==4096 && le16(b+511)==0xAA55);
+        }
+        assert(!ofs_fat_layout_bps(&f,1000,0,4096,0) && f.bits==12 && f.root_sectors==4);
+        assert(!ofs_fat_layout_bps(&f,4096,0,4096,0) && f.bits==16);
+        assert(!ofs_fat_layout_bps(&f,520000UL,0,4096,0) && f.bits==16 && f.spc==8);
+        assert(ofs_fat_layout_bps(&f,524288UL,0,4096,0));
+        assert(ofs_fat_layout_bps(&f,4096,0,768,0));
+        assert(ofs_fat_layout_bps(&f,16384UL,0,4096,1)); /* 64 MiB: too few clusters */
+        ofs_fat_layout_bps(&f,1048576UL,0,4096,1); ofs_fat_fsinfo(&f,b);
+        assert(le16(b+510)==0xAA55);
+    }
     memset(b,0,sizeof(b)); b[1]=0xA0;
     assert(ofs_fat_mark_bad(12,2,b)==1 && b[0]==0xF7 && b[1]==0xAF);
     assert(ofs_fat_mark_bad(12,2,b)==0);
@@ -60,17 +85,18 @@ int main(int argc,char **argv)
     assert(ofs_fat_mark_bad(32,3,b)==0);
     if(argc>=3) {
         n=(ofs_u32)strtoul(argv[1],NULL,10);
-        assert(!(argc==4 ? ofs_fat_layout32(&f,n,0) : ofs_fat_layout(&f,n,0)));
+        /* SECTOR=4096 in the environment: an image of 4096-byte sectors */
+        assert(!ofs_fat_layout_bps(&f,n,0,(unsigned)bps,argc==4));
         file=fopen(argv[2],"wb"); assert(file);
-        assert(!fseek(file,(long)n*512-1,SEEK_SET)); assert(fputc(0,file)!=EOF);
-        rewind(file); ofs_fat_boot(&f,0x12345678,b); assert(fwrite(b,512,1,file)==1);
+        assert(!fseek(file,(long)n*bps-1,SEEK_SET)); assert(fputc(0,file)!=EOF);
+        rewind(file); ofs_fat_boot(&f,0x12345678,b); assert(fwrite(b,bps,1,file)==1);
         ofs_fat_first(&f,b);
-        assert(!fseek(file,(long)f.reserved*512,SEEK_SET)); assert(fwrite(b,512,1,file)==1);
-        assert(!fseek(file,(long)(f.reserved+f.fat_sectors)*512,SEEK_SET)); assert(fwrite(b,512,1,file)==1);
+        assert(!fseek(file,(long)f.reserved*bps,SEEK_SET)); assert(fwrite(b,bps,1,file)==1);
+        assert(!fseek(file,(long)(f.reserved+f.fat_sectors)*bps,SEEK_SET)); assert(fwrite(b,bps,1,file)==1);
         if(f.bits==32) {
-            ofs_fat_boot(&f,0x12345678,b); assert(!fseek(file,6*512,SEEK_SET)); assert(fwrite(b,512,1,file)==1);
-            ofs_fat_fsinfo(&f,b); assert(!fseek(file,512,SEEK_SET)); assert(fwrite(b,512,1,file)==1);
-            assert(!fseek(file,7*512,SEEK_SET)); assert(fwrite(b,512,1,file)==1);
+            ofs_fat_boot(&f,0x12345678,b); assert(!fseek(file,6*bps,SEEK_SET)); assert(fwrite(b,bps,1,file)==1);
+            ofs_fat_fsinfo(&f,b); assert(!fseek(file,bps,SEEK_SET)); assert(fwrite(b,bps,1,file)==1);
+            assert(!fseek(file,7*bps,SEEK_SET)); assert(fwrite(b,bps,1,file)==1);
         }
         assert(!fclose(file));
     }

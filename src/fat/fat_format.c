@@ -1,4 +1,5 @@
-/* FAT12/16/32 layout and 512-byte metadata generation, independent of I/O.
+/* FAT12/16/32 layout and metadata generation, independent of I/O, for
+ * sectors of 512 to 4096 bytes.
  * The caller chooses a bounded physical range, checks DOS FAT32 support and
  * performs all writes/read-back verification. This module does not format
  * drive hardware or discover partitions. On-disk fields use little-endian
@@ -15,47 +16,60 @@ static void le32(unsigned char *p, ofs_u32 v) { le16(p, (ofs_u16)v); le16(p+2, (
  * are based on the resulting cluster count, not the textual FAT label.
  * Return 0 on success; a failed search may leave a partial layout in *f.
  */
-static int layout(struct ofs_fat_layout *f, ofs_u32 total, ofs_u32 hidden,unsigned bits)
+static int layout(struct ofs_fat_layout *f, ofs_u32 total, ofs_u32 hidden,unsigned bits,unsigned bps)
 {
-    ofs_u32 data, clusters, needed, fat;
-    unsigned spc, pass;
-    /* FAT12/16 end at 65524 clusters of 64 sectors; FAT32 at 2^32-1
+    ofs_u32 data, clusters, needed, fat, kib, scale; /* kib: 512-byte units */
+    unsigned spc, pass, maxspc;
+    if (bps != 512 && bps != 1024 && bps != 2048 && bps != 4096) return -1;
+    scale = bps / 512;              /* 512-byte units per sector */
+    /* FAT12/16 end at 65524 clusters of 32 KiB (2 GiB); FAT32 at 2^32-1
      * sectors, the BPB's sector count */
-    if (total < 128 || (bits != 32 && total > 4194303UL) || hidden > 0xFFFFFFFFUL-total) return -1;
-    memset(f, 0, sizeof(*f)); f->sectors = total; f->hidden = hidden;
-    f->bits = (ofs_u8)(bits ? bits : total < 8400UL ? 12 : 16);
+    if (total < 128 || (bits != 32 && total > 4194303UL / scale) || hidden > 0xFFFFFFFFUL-total) return -1;
+    memset(f, 0, sizeof(*f)); f->sectors = total; f->hidden = hidden; f->bps = (ofs_u16)bps;
+    f->bits = (ofs_u8)(bits ? bits : total < 8400UL / scale ? 12 : 16);
     f->reserved = f->bits==32 ? 32 : 1;
-    /* FAT12/16 directory entries occupy 32 bytes each (16 per sector).
+    /* FAT12/16 directory entries occupy 32 bytes each (bps/32 per sector).
      * These selected entry counts are sector-aligned. FAT32 has no fixed root
      * area: root cluster 2 is allocated in the data area instead.
      */
-    f->root_entries = total <= 5760UL ? (total <= 1440UL ? 112 : 224) : 512;
-    f->root_sectors = f->root_entries / 16;
+    f->root_entries = scale == 1 && total <= 5760UL ? (total <= 1440UL ? 112 : 224) : 512;
+    f->root_sectors = (ofs_u16)(f->root_entries * 32U / bps);
     if(f->bits==32) f->root_entries=f->root_sectors=0;
     /* Logical CHS/media defaults for familiar floppy capacities, otherwise
      * a synthetic translation. These describe the BPB and do not probe or
      * program a drive's physical track layout.
      */
-    f->spt = total == 1440UL ? 9 : total == 2880UL ? 18 : total == 5760UL ? 36 : 32;
-    f->heads = total <= 5760UL ? 2 : 8;
-    f->media = total == 1440UL ? 0xF9 : total <= 5760UL ? 0xF0 : 0xF8;
-    /* FAT32 starts at the cluster size of fatgen103's table (for 512-byte
-     * sectors): a smaller one would give a needlessly large FAT */
+    f->spt = scale == 1 && total == 1440UL ? 9 : scale == 1 && total == 2880UL ? 18 :
+             scale == 1 && total == 5760UL ? 36 : 32;
+    f->heads = scale == 1 && total <= 5760UL ? 2 : 8;
+    f->media = scale == 1 && total == 1440UL ? 0xF9 : scale == 1 && total <= 5760UL ? 0xF0 : 0xF8;
+    /* FAT32 starts at the cluster size of fatgen103's table (by the size
+     * of the volume): a smaller one would give a needlessly large FAT */
     spc = 1;
-    if (f->bits == 32)
-        spc = total <= 532480UL ? 1 : total <= 16777216UL ? 8 : total <= 33554432UL ? 16 :
-              total <= 67108864UL ? 32 : 64;
-    for (; spc <= 64; spc *= 2) {
+    /* the volume in 512-byte units (the table's), at most 2^32-1 */
+    kib = total > 0xFFFFFFFFUL / scale ? 0xFFFFFFFFUL : total * scale;
+    if (f->bits == 32) {
+        ofs_u32 cb = kib <= 532480UL ? 512 : kib <= 16777216UL ? 4096 : kib <= 33554432UL ? 8192 :
+                     kib <= 67108864UL ? 16384 : 32768;
+        spc = cb > bps ? cb / bps : 1;
+    }
+    /* clusters of 32 KiB at most (DOS), 64 KiB for FAT32 on larger
+     * sectors (past 8 TiB on 4096-byte sectors it needs them) */
+    maxspc = (f->bits == 32 && bps > 512 ? 65536UL : 32768UL) / bps;
+    for (; spc <= maxspc; spc *= 2) {
         fat = 1;
         for (pass = 0; pass < 32; ++pass) {
             if (f->reserved + 2*fat + f->root_sectors >= total) break;
             data = total - f->reserved - 2*fat - f->root_sectors;
             clusters = data / spc;
-            /* Round (clusters+2)*entry_bits upward to 4096 bits/sector.
-             * The extra entries are FAT's reserved cluster numbers 0 and 1;
-             * this is a size in sectors per FAT copy, not total FAT bytes.
+            /* Round clusters+2 entries upward to whole sectors. The extra
+             * entries are FAT's reserved cluster numbers 0 and 1; this is a
+             * size in sectors per FAT copy, not total FAT bytes. Counted in
+             * entries per sector: (clusters+2)*32 overflows 32 bits on
+             * 4096-byte sectors; FAT12's are few enough to count in bits.
              */
-            needed = ((clusters+2)*f->bits + 4095UL) / 4096UL;
+            needed = f->bits == 12 ? ((clusters+2)*12 + bps*8UL - 1) / (bps*8UL) :
+                     (clusters+2 + bps*8UL/f->bits - 1) / (bps*8UL/f->bits);
             /* Conservatively retain the larger FAT if the iteration toggles. */
             if (needed <= fat) {
                 if ((f->bits == 12 && clusters >= 1 && clusters < 4085) ||
@@ -71,8 +85,14 @@ static int layout(struct ofs_fat_layout *f, ofs_u32 total, ofs_u32 hidden,unsign
     }
     return -1;
 }
-int ofs_fat_layout(struct ofs_fat_layout *f,ofs_u32 total,ofs_u32 hidden) { return layout(f,total,hidden,0); }
-int ofs_fat_layout32(struct ofs_fat_layout *f,ofs_u32 total,ofs_u32 hidden) { return layout(f,total,hidden,32); }
+int ofs_fat_layout(struct ofs_fat_layout *f,ofs_u32 total,ofs_u32 hidden) { return layout(f,total,hidden,0,512); }
+int ofs_fat_layout32(struct ofs_fat_layout *f,ofs_u32 total,ofs_u32 hidden) { return layout(f,total,hidden,32,512); }
+int ofs_fat_layout_bps(struct ofs_fat_layout *f,ofs_u32 total,ofs_u32 hidden,unsigned bps,int fat32)
+{
+    return layout(f,total,hidden,fat32 ? 32 : 0,bps);
+}
+/* bytes per sector of a layout (0 from a caller's own struct: 512) */
+static unsigned bps_of(const struct ofs_fat_layout *f) { return f->bps ? f->bps : 512; }
 void ofs_fat_boot(const struct ofs_fat_layout *f, ofs_u32 serial, unsigned char *b)
 {
     /* BIOS entry prints a non-system-disk message and invokes INT 18h. */
@@ -85,8 +105,8 @@ void ofs_fat_boot(const struct ofs_fat_layout *f, ofs_u32 serial, unsigned char 
      * executable bytes at 62. EB 3C skips the header from IP=7C00 to 7C3E.
      * Total16 and Total32 are alternatives; FAT32 always uses Total32.
      */
-    memset(b, 0, 512); b[0]=0xEB; b[1]=0x3C; b[2]=0x90;
-    memcpy(b+3, "OPENASPI", 8); le16(b+11, 512); b[13]=f->spc;
+    memset(b, 0, bps_of(f)); b[0]=0xEB; b[1]=0x3C; b[2]=0x90;
+    memcpy(b+3, "OPENASPI", 8); le16(b+11, (ofs_u16)bps_of(f)); b[13]=f->spc;
     le16(b+14, f->reserved); b[16]=2; le16(b+17, f->root_entries);
     if (f->bits!=32 && f->sectors <= 65535UL) le16(b+19, (ofs_u16)f->sectors);
     else le32(b+32, f->sectors);
@@ -119,7 +139,7 @@ void ofs_fat_boot(const struct ofs_fat_layout *f, ofs_u32 serial, unsigned char 
 }
 void ofs_fat_first(const struct ofs_fat_layout *f, unsigned char *b)
 {
-    memset(b, 0, 512); b[0]=f->media; b[1]=b[2]=0xFF;
+    memset(b, 0, bps_of(f)); b[0]=f->media; b[1]=b[2]=0xFF;
     if (f->bits==16) b[3]=0xFF;
     if (f->bits==32) { le32(b,0x0FFFFFF8UL); le32(b+4,0xFFFFFFFFUL); le32(b+8,0x0FFFFFFFUL); }
 }
@@ -132,7 +152,7 @@ void ofs_fat_fsinfo(const struct ofs_fat_layout *f,unsigned char *b)
      * free count excludes root cluster 2; next-free hint starts at cluster 3.
      * These are advisory hints, not a substitute for the actual FAT entries.
      */
-    memset(b,0,512); le32(b,0x41615252UL); le32(b+484,0x61417272UL);
+    memset(b,0,bps_of(f)); le32(b,0x41615252UL); le32(b+484,0x61417272UL);
     le32(b+488,f->clusters-1); le32(b+492,3); le32(b+508,0xAA550000UL);
 }
 /* Byte offset into a FAT, not a sector or physical LBA. FAT12 packs two

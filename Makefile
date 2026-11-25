@@ -39,6 +39,7 @@ check: all test dos-check
 	bash tests/exrecover_host.sh
 	bash tests/exchk_host.sh
 	bash tests/exfmt_host.sh
+	bash tests/fatfmt_host.sh
 	bash tests/exfat_write.sh
 	$(H)/test_texfat_crash
 	bash tests/exfat_big.sh

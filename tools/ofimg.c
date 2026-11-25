@@ -55,7 +55,7 @@ static int img_write(void *dev, ofs_lba lba, const void *buf)
 }
 
 /* the formatter counts from the volume's boot sector */
-static int fmt_write(void *dev, ofs_u32 lba, unsigned count, const void *buf)
+static int fmt_write(void *dev, ofs_lba lba, unsigned count, const void *buf)
 {
     (void)dev;
     if (fseeko(image, ((off_t)start + lba) * 512, SEEK_SET)) return -1;

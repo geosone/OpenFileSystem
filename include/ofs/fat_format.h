@@ -1,8 +1,10 @@
-/* Pure FAT layout/metadata helpers. All sizes use 512-byte sectors; hidden
- * is the physical partition offset recorded in the BPB. Layout returns 0/-1;
- * use outputs only after success. Metadata generators require a successful
- * layout and a writable 512-byte output buffer. They perform no I/O or DOS
- * capability checks. The caller owns partition bounds and FAT32 qualification.
+/* Pure FAT layout/metadata helpers. Sizes are in sectors of the layout's
+ * bytes per sector (512 for ofs_fat_layout/ofs_fat_layout32; 512 to 4096
+ * with ofs_fat_layout_bps); hidden is the physical partition offset recorded
+ * in the BPB. Layout returns 0/-1; use outputs only after success. Metadata
+ * generators require a successful layout and a writable output buffer of
+ * one sector (bps bytes). They perform no I/O or DOS capability checks. The
+ * caller owns partition bounds and FAT32 qualification.
  */
 
 #ifndef OFS_FAT_FORMAT_H
@@ -17,6 +19,7 @@ struct ofs_fat_layout {
     ofs_u32 sectors, hidden, clusters, fat_sectors;
     ofs_u16 root_entries, root_sectors, heads, spt, reserved;
     ofs_u8 bits, spc, media;
+    ofs_u16 bps;          /* bytes per sector: 512, 1024, 2048 or 4096 */
 };
 /* Calculate FAT12/16 geometry automatically (up to 4194303 sectors, 2 GiB);
  * layout32 explicitly requests FAT32, from 65525 clusters up to 2^32-1
@@ -26,7 +29,12 @@ struct ofs_fat_layout {
  */
 int ofs_fat_layout(struct ofs_fat_layout *, ofs_u32 sectors, ofs_u32 hidden);
 int ofs_fat_layout32(struct ofs_fat_layout *, ofs_u32 sectors, ofs_u32 hidden);
-/* Generate one 512-byte boot sector. Serial is filesystem metadata, not a
+/* The same for sectors of bps bytes (512, 1024, 2048, 4096); fat32 chooses
+ * FAT32 as layout32 does. FAT32 still ends at 2^32-1 sectors, so 4096-byte
+ * sectors reach 16 TiB; clusters go up to 64 KiB there (32 KiB with 512).
+ * FAT12/16 end at 2 GiB as with 512-byte sectors. */
+int ofs_fat_layout_bps(struct ofs_fat_layout *, ofs_u32 sectors, ofs_u32 hidden, unsigned bps, int fat32);
+/* Generate one boot sector (bps bytes). Serial is filesystem metadata, not a
  * hardware ID. Boot code reports a non-system disk; this does not install DOS.
  */
 void ofs_fat_boot(const struct ofs_fat_layout *, ofs_u32 serial, unsigned char *);

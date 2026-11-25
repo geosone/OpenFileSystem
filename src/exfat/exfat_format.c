@@ -19,32 +19,48 @@
 static void wr16(ofs_u8 OFS_FAR *p, ofs_u16 v) { p[0] = (ofs_u8)v; p[1] = (ofs_u8)(v >> 8); }
 static void wr32(ofs_u8 OFS_FAR *p, ofs_u32 v) { wr16(p, (ofs_u16)v); wr16(p + 2, (ofs_u16)(v >> 16)); }
 static ofs_u32 rot32(ofs_u32 sum, ofs_u8 b) { return ((sum & 1) ? 0x80000000UL : 0) + (sum >> 1) + b; }
+#ifndef OFS_NARROW
+static void wr64(ofs_u8 OFS_FAR *p, ofs_lba v) { wr32(p, (ofs_u32)v); wr32(p + 4, (ofs_u32)(v >> 32)); }
+#else
+static void wr64(ofs_u8 OFS_FAR *p, ofs_lba v) { wr32(p, v); wr32(p + 4, 0); }
+#endif
+
+/* bytes per sector: the shift, 9 for a caller that did not set it */
+static unsigned sshift_of(const struct ofs_exfmt *f) { return f->sshift ? f->sshift : 9; }
 
 int ofs_exfmt_layout(struct ofs_exfmt *f)
 {
-    ofs_u32 csz = f->cluster, spc, al, mb = f->sectors >> 11, len = 0, need, n;
-    if (f->sectors < OFS_EXFMT_MINSECT || (f->nfats != 1 && f->nfats != 2) || f->label_len > 11) return -1;
+    unsigned ss = sshift_of(f);
+    ofs_u32 csz = f->cluster, spc, al, len = 0, need, epsec, n;
+    ofs_lba mb, m;
+    if (ss < 9 || ss > 12) return -1;
+    mb = f->sectors >> (20 - ss);                   /* the volume in MiB */
+    if ((f->sectors << ss >> 9) < OFS_EXFMT_MINSECT || (f->nfats != 1 && f->nfats != 2) || f->label_len > 11) return -1;
     if (!csz) csz = mb <= 256 ? 4096UL : mb <= 32768UL ? 32768UL : 131072UL;
-    for (f->cshift = 0; f->cshift < 16 && (512UL << f->cshift) < csz; ++f->cshift) ;
-    if ((512UL << f->cshift) != csz) return -1;     /* a power of two, 512 bytes to 32 MB */
+    if (csz < (1UL << ss)) csz = 1UL << ss;
+    for (f->cshift = 0; f->cshift < 25 - ss && ((ofs_u32)1 << (ss + f->cshift)) < csz; ++f->cshift) ;
+    if (((ofs_u32)1 << (ss + f->cshift)) != csz) return -1;     /* a power of two, a sector to 32 MB */
     spc = 1UL << f->cshift;
+    epsec = (1UL << ss) / 4;                        /* FAT entries per sector */
     if (f->align & (f->align - 1)) return -1;
     al = f->align > spc ? f->align : spc;
     f->fat_off = (24 + spc - 1) & ~(spc - 1);       /* FAT and heap on cluster boundaries */
     for (;;) {
         f->heap = (f->fat_off + f->nfats * len + al - 1) & ~(al - 1);
         if (f->heap >= f->sectors) return -1;
-        n = (f->sectors - f->heap) >> f->cshift;
-        need = (n + 2 + 127) / 128;
+        m = (f->sectors - f->heap) >> f->cshift;
+        if (m > 0xFFFFFFF5UL) return -1;            /* clusters too small for the volume */
+        n = (ofs_u32)m;
+        need = (n + 2 + epsec - 1) / epsec;
         if (need <= len) break;
         len = need;
     }
     f->fat_len = len;
     f->clusters = n;
     f->bitmap_len = (n + 7) / 8;
-    f->sys_clusters = f->nfats * ((f->bitmap_len + (csz - 1)) >> (9 + f->cshift))
-                      + ((OFS_EXFMT_UPCASE_LEN + csz - 1) >> (9 + f->cshift)) + 1;
-    return n > 0xFFFFFFF5UL || n <= f->sys_clusters ? -1 : 0;
+    f->sys_clusters = f->nfats * ((f->bitmap_len + (csz - 1)) >> (ss + f->cshift))
+                      + ((OFS_EXFMT_UPCASE_LEN + csz - 1) >> (ss + f->cshift)) + 1;
+    return n <= f->sys_clusters ? -1 : 0;
 }
 
 /* the format in progress */
@@ -118,12 +134,14 @@ static void fill_bitmap(ofs_u8 OFS_FAR *b, ofs_u32 o, unsigned n)
     }
 }
 
+static unsigned BPS;                    /* bytes per sector of the format in progress */
+
 static void root_dir(ofs_u8 OFS_FAR *b)
 {
     ofs_u32 sum = 0;
     unsigned i;
     ofs_u8 OFS_FAR *e = b;
-    fmemset(b, 0, 512);
+    fmemset(b, 0, BPS);
     if (F->label_len) {
         e[0] = 0x83;
         e[1] = F->label_len;
@@ -146,23 +164,23 @@ static void root_dir(ofs_u8 OFS_FAR *b)
 /* sector s of system file k */
 static void file_sector(unsigned k, ofs_u32 s, ofs_u8 OFS_FAR *b)
 {
-    ofs_u32 o = s * 512;
-    fmemset(b, 0, 512);
-    if (k < 2) fill_bitmap(b, o, 512);
+    ofs_u32 o = s * BPS;
+    fmemset(b, 0, BPS);
+    if (k < 2) fill_bitmap(b, o, BPS);
     else if (k == 2) {
         if (o < OFS_EXFMT_UPCASE_LEN)
-            fmemcpy(b, ofs_exfmt_upcase + (unsigned)o, OFS_EXFMT_UPCASE_LEN - o < 512 ? (unsigned)(OFS_EXFMT_UPCASE_LEN - o) : 512);
+            fmemcpy(b, ofs_exfmt_upcase + (unsigned)o, OFS_EXFMT_UPCASE_LEN - o < BPS ? (unsigned)(OFS_EXFMT_UPCASE_LEN - o) : BPS);
     } else if (!s) root_dir(b);
 }
 
 static void boot_sector(ofs_u8 OFS_FAR *b)
 {
     ofs_u32 used = F->sys_clusters + nbad;
-    fmemset(b, 0, 512);
+    fmemset(b, 0, BPS);
     b[0] = 0xEB; b[1] = 0x76; b[2] = 0x90;
     fmemcpy(b + 3, "EXFAT   ", 8);
-    wr32(b + 64, F->hidden);
-    wr32(b + 72, F->sectors);
+    wr64(b + 64, F->hidden);            /* PartitionOffset */
+    wr64(b + 72, F->sectors);           /* VolumeLength */
     wr32(b + 80, F->fat_off);
     wr32(b + 84, F->fat_len);
     wr32(b + 88, F->heap);
@@ -170,7 +188,7 @@ static void boot_sector(ofs_u8 OFS_FAR *b)
     wr32(b + 96, first[3]);
     wr32(b + 100, F->serial);
     wr16(b + 104, 0x0100);              /* revision 1.00 */
-    b[108] = 9;
+    b[108] = (ofs_u8)sshift_of(F);
     b[109] = F->cshift;
     b[110] = F->nfats;
     b[111] = 0x80;
@@ -187,11 +205,12 @@ static int boot_region(ofs_exfmt_write_fn wr, void *dev, ofs_u32 lba, ofs_u8 OFS
     for (s = 0; s < 12; ++s) {
         if (!s) boot_sector(b);
         else if (s < 11) {
-            fmemset(b, 0, 512);
-            if (s < 9) { b[510] = 0x55; b[511] = 0xAA; }    /* extended boot sectors */
-        } else for (i = 0; i < 128; ++i) wr32(b + 4 * i, sum);
+            fmemset(b, 0, BPS);
+            /* extended boot sectors: the signature in the last 4 bytes */
+            if (s < 9) { b[BPS - 2] = 0x55; b[BPS - 1] = 0xAA; }
+        } else for (i = 0; i < BPS / 4; ++i) wr32(b + 4 * i, sum);
         if (s < 11)
-            for (i = 0; i < 512; ++i)
+            for (i = 0; i < BPS; ++i)
                 if (s || (i != 106 && i != 107 && i != 112)) sum = rot32(sum, b[i]);
         if (wr(dev, lba + s, 1, b)) return -1;
     }
@@ -201,7 +220,7 @@ static int boot_region(ofs_exfmt_write_fn wr, void *dev, ofs_u32 lba, ofs_u8 OFS
 static int zeros(ofs_exfmt_write_fn wr, void *dev, ofs_u32 lba, ofs_u32 n, ofs_u8 OFS_FAR *buf, unsigned nbuf)
 {
     unsigned k;
-    fmemset(buf, 0, nbuf * 512);
+    fmemset(buf, 0, nbuf * BPS);
     for (; n; n -= k, lba += k) {
         k = n < nbuf ? (unsigned)n : nbuf;
         if (wr(dev, lba, k, buf)) return -1;
@@ -212,9 +231,11 @@ static int zeros(ofs_exfmt_write_fn wr, void *dev, ofs_u32 lba, ofs_u32 n, ofs_u
 int ofs_exfmt_write(struct ofs_exfmt *f, ofs_exfmt_write_fn wr, void *dev,
                    const ofs_u32 *badlist, unsigned badcount, ofs_u8 OFS_FAR *buf, unsigned nbuf)
 {
-    ofs_u32 c, s, n, lba, spc = 1UL << f->cshift, csz = spc * 512;
+    ofs_u32 c, s, n, lba, spc = 1UL << f->cshift, csz;
     unsigned k, i, j;
     F = f; bad = badlist; nbad = badcount; bi = 0;
+    BPS = 1U << sshift_of(f);
+    csz = spc * BPS;
     /* the system files, one after the other round the bad clusters */
     size[0] = (f->bitmap_len + csz - 1) / csz;
     size[1] = f->nfats == 2 ? size[0] : 0;
@@ -242,7 +263,7 @@ int ofs_exfmt_write(struct ofs_exfmt *f, ofs_exfmt_write_fn wr, void *dev,
     for (j = 0; j < f->nfats; ++j)
         for (s = 0; s < f->fat_len; s += k) {
             k = f->fat_len - s < nbuf ? (unsigned)(f->fat_len - s) : nbuf;
-            for (i = 0; i < k; ++i) fill_fat(buf + i * 512, (s + i) * 128, 128);
+            for (i = 0; i < k; ++i) fill_fat(buf + i * BPS, (s + i) * (BPS / 4), BPS / 4);
             if (wr(dev, f->fat_off + j * f->fat_len + s, k, buf)) return -1;
         }
     lba = f->fat_off + f->nfats * f->fat_len;
@@ -253,8 +274,8 @@ int ofs_exfmt_write(struct ofs_exfmt *f, ofs_exfmt_write_fn wr, void *dev,
         for (c = first[k]; ; c = next_good(c)) {
             for (n = 0; n < spc; n += i) {
                 i = spc - n < nbuf ? (unsigned)(spc - n) : nbuf;
-                for (j = 0; j < i; ++j) file_sector(k, s + j, buf + j * 512);
-                if (wr(dev, f->heap + ((c - 2) << f->cshift) + n, i, buf)) return -1;
+                for (j = 0; j < i; ++j) file_sector(k, s + j, buf + j * BPS);
+                if (wr(dev, f->heap + ((ofs_lba)(c - 2) << f->cshift) + n, i, buf)) return -1;
                 s += i;
             }
             if (c == last[k]) break;
