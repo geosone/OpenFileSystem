@@ -296,6 +296,39 @@ static int settime(struct fs_node *dir, const char *name, unsigned which, uint16
 }
 #endif
 
+/* FS_XATTR_SET .. _REMOVE are OFS_EA_*'s numbers */
+_Static_assert(FS_XATTR_SET == OFS_EA_SET && FS_XATTR_CREATE == OFS_EA_CREATE &&
+		       FS_XATTR_REPLACE == OFS_EA_REPLACE && FS_XATTR_REMOVE == OFS_EA_REMOVE,
+	       "FS_XATTR_ and OFS_EA_ differ");
+static int xattr(struct fs_node *dir, const char *name, int op, const char *ea, void *buf, uint32_t size,
+		 uint32_t *len)
+{
+	unsigned l = fs_utf8_to16(name, n16, 256);
+	uint16_t n = 0;
+	int r;
+
+	if (l > 255)
+		return FS_ENOENT;
+	if (size > 0xFFFF) {
+		if (op != FS_XATTR_GET && op != FS_XATTR_LIST)
+			return FS_EFULL;          /* a file's EAs hold at most 64 KiB */
+		size = 0xFFFF;
+	}
+	if (op == FS_XATTR_GET)
+		r = ofs_getea(VOL(dir->vol), NODE(dir), n16, l, ea, buf, (uint16_t)size, &n);
+	else if (op == FS_XATTR_LIST)
+		r = ofs_listea(VOL(dir->vol), NODE(dir), n16, l, buf, (uint16_t)size, &n);
+#ifndef OFS_READONLY
+	else
+		r = ofs_setea(VOL(dir->vol), NODE(dir), n16, l, ea, buf, (uint16_t)size, op);
+#else
+	else
+		r = FS_EROFS;
+#endif
+	*len = n;
+	return r == OFS_ENOATTR ? FS_ENOATTR : r == OFS_ERANGE ? FS_ERANGE : r;
+}
+
 const struct fs_driver ofs_gw_driver = {
 	OFS_GW_NAME, probe, mount, root, lookup, readdir, read,
 #ifndef OFS_READONLY
@@ -309,6 +342,7 @@ const struct fs_driver ofs_gw_driver = {
 #else
 	NULL, NULL,
 #endif
+	xattr,
 };
 
 /* from the module's init: its heap owner holds the volumes' buffers */

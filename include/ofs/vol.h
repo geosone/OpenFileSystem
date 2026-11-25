@@ -44,6 +44,8 @@
 #define OFS_EROFS   -23     /* the volume is read-only (or the file system) */
 #define OFS_ENOTSUP -24     /* not supported (an encrypted NTFS file ...) */
 #define OFS_ENOTEMPTY -25
+#define OFS_ENOATTR -26     /* no such extended attribute */
+#define OFS_ERANGE  -27     /* a buffer too small for it */
 
 /* attributes as DOS has them (every core uses these values) */
 #define OFS_ATTR_RDONLY 0x01
@@ -192,5 +194,22 @@ int ofs_setattr(struct ofs_vol *, struct ofs_node *dir, const ofs_u16 *name, uns
 #define OFS_TIME_ACCESSED 2
 int ofs_settime(struct ofs_vol *, struct ofs_node *dir, const ofs_u16 *name, unsigned len, unsigned which,
                 ofs_u16 time, ofs_u16 date, ofs_u8 cs10);
+/* Extended attributes of the entry name in dir: OS/2's and Windows NT's
+   on FAT12/16 ("EA DATA. SF"), OFS_ENOTSUP elsewhere for now.  Names are
+   1-255 bytes of the code page, compared without case; a file's EAs hold
+   at most 65535 bytes together.  ofs_setea: OFS_EA_SET, _CREATE (OFS_EEXIST
+   when it is there), _REPLACE (OFS_ENOATTR when not), _REMOVE. */
+int ofs_setea(struct ofs_vol *, struct ofs_node *dir, const ofs_u16 *name, unsigned len, const char *ea,
+              const void OFS_FAR *val, ofs_u16 vlen, int how);
 #endif
+#define OFS_EA_SET     0
+#define OFS_EA_CREATE  1
+#define OFS_EA_REPLACE 2
+#define OFS_EA_REMOVE  3
+/* The value's length in *vlen, the value into buf unless size is 0. */
+int ofs_getea(struct ofs_vol *, struct ofs_node *dir, const ofs_u16 *name, unsigned len, const char *ea,
+              void OFS_FAR *buf, ofs_u16 size, ofs_u16 *vlen);
+/* The names, each with a NUL, into buf (size 0: only their length). */
+int ofs_listea(struct ofs_vol *, struct ofs_node *dir, const ofs_u16 *name, unsigned len,
+               char OFS_FAR *buf, ofs_u16 size, ofs_u16 *total);
 #endif

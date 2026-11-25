@@ -33,7 +33,13 @@ struct ofs_fs {
     int (*settime)(struct ofs_vol *, struct ofs_node *dir, ofs_u32 pos, struct ofs_node *n, unsigned which,
                    ofs_u16 time, ofs_u16 date, ofs_u8 cs10);
 #endif
+    /* extended attributes of the entry at pos in dir: OFS_EA_* or EA_GET,
+       EA_LIST; NULL: none */
+    int (*ea)(struct ofs_vol *, struct ofs_node *dir, ofs_u32 pos, int op, const char *name,
+              void OFS_FAR *buf, ofs_u16 size, ofs_u16 *len);
 };
+#define EA_GET  8
+#define EA_LIST 9
 
 /* ---- shared ---- */
 
@@ -61,7 +67,7 @@ static int same(const ofs_u16 *a, unsigned alen, const ofs_u16 *b, unsigned blen
     return 1;
 }
 
-#ifndef OFS_READONLY
+#if !defined(OFS_READONLY) && (!defined(OFS_NO_FAT) || !defined(OFS_NO_EXFAT))
 static int now(struct ofs_vol *v, ofs_u16 *t, ofs_u16 *d)
 {
     *t = *d = 0;
@@ -203,12 +209,33 @@ static int fat_settime(struct ofs_vol *v, struct ofs_node *dir, ofs_u32 pos, str
 }
 #endif
 
+static int fat_ea(struct ofs_vol *v, struct ofs_node *dir, ofs_u32 pos, int op, const char *name,
+                  void OFS_FAR *buf, ofs_u16 size, ofs_u16 *len)
+{
+    static struct ofs_fat_ent e;
+#ifndef OFS_READONLY
+    ofs_u16 t, d;
+#endif
+    int r = ofs_fat_entry_at(&v->u.fat, &dir->u.fat.f, pos, &e);
+    if (r) return r;
+    if (op == EA_GET) return ofs_fat_ea_get(&v->u.fat, &e, name, buf, size, len);
+    if (op == EA_LIST) return ofs_fat_ea_list(&v->u.fat, &e, (char OFS_FAR *)buf, size, len);
+#ifdef OFS_READONLY
+    return OFS_EROFS;
+#else
+    now(v, &t, &d);
+    if (!d) d = 0x21;                  /* 1980-01-01 without a clock */
+    return ofs_fat_ea_set(&v->u.fat, &dir->u.fat.f, &e, name, buf, size, op, t, d);
+#endif
+}
+
 static const struct ofs_fs fs_fat = {
     ofs_fat_probe, fat_mount, fat_root, fat_next, fat_lookup, fat_read, fat_statfs
 #ifndef OFS_READONLY
     , fat_write, fat_resize, fat_create, fat_empty, fat_remove, fat_rename, fat_sync, 0xFFFFFFFFUL,
     fat_setattr, fat_settime
 #endif
+    , fat_ea
 };
 #endif
 
@@ -335,6 +362,7 @@ static const struct ofs_fs fs_exfat = {
 #endif
     ex_setattr, ex_settime
 #endif
+    , NULL
 };
 #endif
 
@@ -483,6 +511,7 @@ static const struct ofs_fs fs_ntfs = {
 #endif
     nt_setattr, nt_settime
 #endif
+    , NULL
 };
 #endif
 
@@ -541,6 +570,7 @@ static const struct ofs_fs fs_iso = {
 #ifndef OFS_READONLY
     , NULL, NULL, NULL, NULL, NULL, NULL, NULL, 0, NULL, NULL
 #endif
+    , NULL
 };
 #endif
 
@@ -600,6 +630,7 @@ static const struct ofs_fs fs_udf = {
 #ifndef OFS_READONLY
     , NULL, NULL, NULL, NULL, NULL, NULL, NULL, 0, NULL, NULL
 #endif
+    , NULL
 };
 #endif
 
@@ -726,6 +757,22 @@ int ofs_statfs(struct ofs_vol *v, ofs_u32 *free_clusters, ofs_u32 *cluster_bytes
     return v->fs->statfs(v, free_clusters, cluster_bytes, clusters);
 }
 
+/* the position of n's entry in its directory */
+static int entry_pos(struct ofs_vol *v, const struct ofs_node *n, ofs_u32 *pos)
+{
+    (void)v; (void)n; (void)pos;
+#ifndef OFS_NO_FAT
+    if (v->fs == &fs_fat) { *pos = n->u.fat.w.pos; return 0; }
+#endif
+#ifndef OFS_NO_EXFAT
+    if (v->fs == &fs_exfat) { *pos = n->u.ex.w.pos; return 0; }
+#endif
+#ifndef OFS_NO_NTFS
+    if (v->fs == &fs_ntfs) return OFS_ENOTSUP;  /* removing and renaming: not yet */
+#endif
+    return OFS_EROFS;
+}
+
 #ifndef OFS_READONLY
 #define WRITABLE(v) if (!((v)->caps & OFS_CAP_WRITE)) return OFS_EROFS
 
@@ -779,19 +826,6 @@ int ofs_create(struct ofs_vol *v, struct ofs_node *dir, const ofs_u16 *name, uns
 }
 
 /* where the entry of a node is, as the core's remove and rename want it */
-static int entry_pos(struct ofs_vol *v, const struct ofs_node *n, ofs_u32 *pos)
-{
-#ifndef OFS_NO_FAT
-    if (v->fs == &fs_fat) { *pos = n->u.fat.w.pos; return 0; }
-#endif
-#ifndef OFS_NO_EXFAT
-    if (v->fs == &fs_exfat) { *pos = n->u.ex.w.pos; return 0; }
-#endif
-#ifndef OFS_NO_NTFS
-    if (v->fs == &fs_ntfs) return OFS_ENOTSUP;  /* removing and renaming: not yet */
-#endif
-    return OFS_EROFS;
-}
 
 int ofs_remove(struct ofs_vol *v, struct ofs_node *dir, const ofs_u16 *name, unsigned len)
 {
@@ -869,5 +903,42 @@ int ofs_sync(struct ofs_vol *v)
 {
     if (!(v->caps & OFS_CAP_WRITE) || !v->fs->sync) return 0;
     return v->fs->sync(v);
+}
+#endif
+
+
+/* the entry of name in dir for its extended attributes */
+static int ea_call(struct ofs_vol *v, struct ofs_node *dir, const ofs_u16 *name, unsigned len, int op,
+                   const char *ea, void OFS_FAR *buf, ofs_u16 size, ofs_u16 *out)
+{
+    static struct ofs_dirent de;
+    ofs_u32 pos;
+    int r;
+    *out = 0;
+    if (!v->fs->ea) return OFS_ENOTSUP;
+    if ((r = ofs_lookup(v, dir, name, len, &de)) || (r = entry_pos(v, &de.node, &pos))) return r;
+    return v->fs->ea(v, dir, pos, op, ea, buf, size, out);
+}
+
+int ofs_getea(struct ofs_vol *v, struct ofs_node *dir, const ofs_u16 *name, unsigned len, const char *ea,
+              void OFS_FAR *buf, ofs_u16 size, ofs_u16 *vlen)
+{
+    return ea_call(v, dir, name, len, EA_GET, ea, buf, size, vlen);
+}
+
+int ofs_listea(struct ofs_vol *v, struct ofs_node *dir, const ofs_u16 *name, unsigned len,
+               char OFS_FAR *buf, ofs_u16 size, ofs_u16 *total)
+{
+    return ea_call(v, dir, name, len, EA_LIST, NULL, buf, size, total);
+}
+
+#ifndef OFS_READONLY
+int ofs_setea(struct ofs_vol *v, struct ofs_node *dir, const ofs_u16 *name, unsigned len, const char *ea,
+              const void OFS_FAR *val, ofs_u16 vlen, int how)
+{
+    ofs_u16 n;
+    WRITABLE(v);
+    if (how < OFS_EA_SET || how > OFS_EA_REMOVE) return OFS_ENOTSUP;
+    return ea_call(v, dir, name, len, how, ea, (void OFS_FAR *)val, vlen, &n);
 }
 #endif

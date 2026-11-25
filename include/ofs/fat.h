@@ -22,6 +22,9 @@
 #define OFS_FAT_EWRITE -5      /* sector write failed, or no write function */
 #define OFS_FAT_EEXIST -6      /* the name exists */
 #define OFS_FAT_ENAME  -7      /* not a valid long name */
+#define OFS_FAT_ENOTSUP -24    /* extended attributes on FAT32 */
+#define OFS_FAT_ENOATTR -26    /* no such extended attribute */
+#define OFS_FAT_ERANGE  -27    /* the buffer is too small for it */
 
 #define OFS_FAT_RDONLY 0x01
 #define OFS_FAT_HIDDEN 0x02
@@ -84,6 +87,8 @@ struct ofs_fat_ent {
     ofs_u32 pos;               /* byte offset of the short entry */
     ofs_u32 lfn;               /* offset of the first entry of the set */
     ofs_u8 attr, ntcase;       /* ntcase: 08h base, 10h extension lower case */
+    ofs_u16 ea;                /* FAT12/16: the OS/2 and NT extended attributes'
+                                   handle (offset 14h), 0: none */
     ofs_u16 time, date;        /* last written */
     ofs_u16 ctime, cdate, adate;
     ofs_u8 ctime_cs;           /* 10 ms units of ctime */
@@ -145,6 +150,39 @@ int ofs_fat_attr(struct ofs_fat *, struct ofs_fat_file *dir, ofs_u32 pos, ofs_u8
 #define OFS_FAT_ACCESSED 18
 int ofs_fat_time(struct ofs_fat *, struct ofs_fat_file *dir, ofs_u32 pos, unsigned which,
                   ofs_u16 time, ofs_u16 date, ofs_u8 cs10);
+/* The entry whose short entry is at pos. */
+int ofs_fat_entry_at(struct ofs_fat *, struct ofs_fat_file *dir, ofs_u32 pos, struct ofs_fat_ent *);
+/* A file with exactly the short name fcb and no long name (as "EA DATA. SF",
+   whose space no long name would keep). */
+int ofs_fat_create_fcb(struct ofs_fat *, struct ofs_fat_file *dir, const char fcb[11], ofs_u8 attr,
+                        ofs_u16 time, ofs_u16 date, ofs_u32 *pos);
+/* FAT12/16: the extended attributes' handle of the entry at pos. */
+int ofs_fat_set_ea(struct ofs_fat *, struct ofs_fat_file *dir, ofs_u32 pos, ofs_u16 handle);
+
+/* OS/2's and Windows NT's extended attributes on FAT12/16 (src/fat/fat_ea.c):
+   one hidden file "EA DATA. SF" in the root directory holds every file's
+   set, the directory entry the set's handle (offset 14h, which FAT32 needs
+   for the cluster number: OFS_FAT_ENOTSUP there).  Names are 1-255 bytes,
+   compared without case; a set holds at most 65535 bytes.  e is the entry
+   (ofs_fat_entry_at, ofs_fat_find); time and date stamp a new EA file.
+   Changing a set is safe against power loss: the new set is appended, its
+   handle then points to it (one write), the old one is squeezed out last;
+   what a crash leaves behind the next change squeezes out. */
+#define OFS_FAT_EA_SET     0   /* create or replace */
+#define OFS_FAT_EA_CREATE  1   /* OFS_FAT_EEXIST when it exists */
+#define OFS_FAT_EA_REPLACE 2   /* OFS_FAT_ENOATTR when it does not */
+#define OFS_FAT_EA_REMOVE  3
+/* The value's length in *len, the value into buf when size is not 0. */
+int ofs_fat_ea_get(struct ofs_fat *, const struct ofs_fat_ent *e, const char *name, void OFS_FAR *buf,
+                    ofs_u16 size, ofs_u16 *len);
+/* The names, each with a NUL, into buf (size 0: only their length). */
+int ofs_fat_ea_list(struct ofs_fat *, const struct ofs_fat_ent *e, char OFS_FAR *buf, ofs_u16 size,
+                     ofs_u16 *len);
+int ofs_fat_ea_set(struct ofs_fat *, struct ofs_fat_file *dir, const struct ofs_fat_ent *e, const char *name,
+                    const void OFS_FAR *val, ofs_u16 vlen, int how, ofs_u16 time, ofs_u16 date);
+/* A removed file's set (ofs_fat_remove does it). */
+int ofs_fat_ea_drop(struct ofs_fat *, ofs_u16 handle);
+
 /* The dirty bit cleared (unless it was set before the mount), FSInfo. */
 int ofs_fat_clean(struct ofs_fat *);
 #endif

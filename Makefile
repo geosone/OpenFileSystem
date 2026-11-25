@@ -8,7 +8,7 @@ CPPFLAGS += -Iinclude
 
 HDR      := $(wildcard include/ofs/*.h)
 CPSRC    := src/codepage.c src/latin.c src/exfat/upcase.c src/name83.c
-FATSRC   := src/fat/fat.c $(CPSRC)
+FATSRC   := src/fat/fat.c src/fat/fat_ea.c $(CPSRC)
 EXFAT    := src/exfat/exfat.c $(CPSRC)
 # the UNI_<cp>.TAB files the tests load (mars-unicode-tables)
 UNITAB   ?= ../mars-unicode-tables/TAB/unitables
@@ -95,7 +95,7 @@ $(TESTBINS):
 
 # ofsfuse (hosts/posix): every core through the common interface
 # (src/vol.c), mounted with FUSE 3 -- for testing the cores on Linux
-FUSESRC := hosts/posix/ofsfuse.c src/vol.c src/fat/fat.c src/exfat/exfat.c src/ntfs/ntfs.c src/iso9660/iso9660.c src/udf/udf.c src/dostime.c src/part/part.c $(CPSRC)
+FUSESRC := hosts/posix/ofsfuse.c src/vol.c src/fat/fat.c src/fat/fat_ea.c src/exfat/exfat.c src/ntfs/ntfs.c src/iso9660/iso9660.c src/udf/udf.c src/dostime.c src/part/part.c $(CPSRC)
 fuse: $(H)/ofsfuse
 $(H)/ofsfuse: $(FUSESRC) $(HDR)
 	mkdir -p $(@D)

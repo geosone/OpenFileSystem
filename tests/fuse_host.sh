@@ -51,7 +51,12 @@ fail() { failed=1; echo "FAIL: $*" >&2; exit 1; }
 mount_ofs() {
 	"$ofsfuse" -o unitab="$unitab" "$@" "$mnt" 2>"$work/ofsfuse.log" || { cat "$work/ofsfuse.log" >&2; fail "ofsfuse $*"; }
 }
-umount_ofs() { fusermount3 -u "$mnt"; }
+# FUSE releases closed files asynchronously: right after a write the mount
+# can still be busy for a moment
+umount_ofs() {
+	for _ in 1 2 3 4 5 6 7 8 9 10; do fusermount3 -u "$mnt" 2>/dev/null && return 0; sleep 0.3; done
+	fusermount3 -u "$mnt"
+}
 
 # the same operation in the reference ($ref) and through ofsfuse ($mnt)
 both() { (cd "$ref" && eval "$1") && (cd "$mnt" && eval "$1") || fail "$1"; }
@@ -135,6 +140,99 @@ for kind in fat12 fat16 fat32 exfat; do
 	umount_ofs
 	linux_view "$img" "$kind"
 	echo "$kind passed"
+done
+
+# Extended attributes: OS/2's and NT's "EA DATA. SF" on FAT12/16 as user.*
+# xattrs; FAT32 and exFAT have none yet. The EA file is checked against the
+# layout by tests/fat_ea_check.py, the volume by fsck.fat.
+for kind in fat12 fat16 fat32 exfat; do
+	img=$work/ea-$kind.img
+	case $kind in
+	fat12) truncate -s 16M "$img"; mkfs.fat -F 12 -n OFSEA "$img" >/dev/null ;;
+	fat16) truncate -s 64M "$img"; mkfs.fat -F 16 -n OFSEA "$img" >/dev/null ;;
+	fat32) truncate -s 128M "$img"; mkfs.fat -F 32 -n OFSEA "$img" >/dev/null ;;
+	exfat) truncate -s 128M "$img"; mkfs.exfat -q -L OFSEA "$img" ;;
+	esac
+	mount_ofs "$img"
+	printf 'eins\r\n' > "$mnt/EINS.TXT"
+	printf 'zwei\r\n' > "$mnt/Zwei mit langem Namen.txt"
+	printf 'drei\r\n' > "$mnt/DREI.TXT"
+	mkdir "$mnt/ORDNER"
+	case $kind in fat32|exfat)
+		python3 -I - "$mnt/EINS.TXT" <<'PY' || fail "$kind: xattrs are not refused"
+import errno, os, sys
+try:
+    os.setxattr(sys.argv[1], 'user.x', b'1')
+except OSError as e:
+    sys.exit(e.errno not in (errno.EOPNOTSUPP, errno.ENOTSUP))
+sys.exit(1)
+PY
+		umount_ofs
+		echo "$kind: no EAs (refused) passed"
+		continue
+	esac
+	head -c 40000 /dev/urandom > "$work/eabig"
+	python3 -I - "$mnt" "$work/eabig" <<'PY' || fail "$kind: xattrs through ofsfuse"
+import errno, os, sys
+m, big = sys.argv[1], open(sys.argv[2], 'rb').read()
+one, two, three, d = (os.path.join(m, n) for n in ('EINS.TXT', 'Zwei mit langem Namen.txt', 'DREI.TXT', 'ORDNER'))
+def err(f, *a):
+    try:
+        f(*a)
+    except OSError as e:
+        return e.errno
+    return 0
+os.setxattr(one, 'user.comment', b'Hallo Welt')
+os.setxattr(one, 'user.bin', bytes([0, 255, 16]))
+os.setxattr(two, 'user.gross', big)
+os.setxattr(three, 'user.a', b'A')
+os.setxattr(d, 'user.ordner', b'ja')
+assert os.getxattr(one, 'user.comment') == b'Hallo Welt'
+assert os.getxattr(one, 'user.COMMENT') == b'Hallo Welt', 'names without case'
+assert os.getxattr(one, 'user.bin') == bytes([0, 255, 16])
+assert os.getxattr(two, 'user.gross') == big
+assert os.getxattr(d, 'user.ordner') == b'ja'
+assert sorted(os.listxattr(one)) == ['user.bin', 'user.comment'], os.listxattr(one)
+assert err(os.setxattr, one, 'user.comment', b'x', os.XATTR_CREATE) == errno.EEXIST
+assert err(os.setxattr, one, 'user.neu', b'x', os.XATTR_REPLACE) == errno.ENODATA
+assert err(os.getxattr, one, 'user.fehlt') == errno.ENODATA
+assert err(os.setxattr, one, 'trusted.x', b'x') in (errno.EOPNOTSUPP, errno.ENOTSUP, errno.EPERM)
+assert err(os.setxattr, two, 'user.zuviel', bytes(30000)) in (errno.ENOSPC, errno.E2BIG), 'over 64 KiB'
+# changes: replace (longer), remove one, the set of an earlier file grows
+os.setxattr(one, 'user.comment', b'Ein deutlich laengerer Kommentar' * 40, os.XATTR_REPLACE)
+os.removexattr(one, 'user.bin')
+assert os.listxattr(one) == ['user.comment']
+os.setxattr(three, 'user.b', b'B' * 3000)
+assert os.getxattr(two, 'user.gross') == big, 'moved sets keep their values'
+assert os.getxattr(three, 'user.a') == b'A'
+# renaming keeps them; removing the last one drops the set
+os.rename(two, os.path.join(m, 'Vier.txt'))
+assert os.getxattr(os.path.join(m, 'Vier.txt'), 'user.gross') == big
+os.removexattr(d, 'user.ordner')
+assert os.listxattr(d) == []
+PY
+	sz1=$(stat -c %s "$mnt/EA DATA. SF")
+	rm "$mnt/Vier.txt"
+	sz2=$(stat -c %s "$mnt/EA DATA. SF")
+	[ "$sz2" -lt "$sz1" ] || fail "$kind: removing a file kept its EAs ($sz1 -> $sz2)"
+	umount_ofs
+	fsck.fat -n "$img" > "$work/fsck.txt" 2>&1 || { cat "$work/fsck.txt" >&2; fail "$kind: fsck.fat"; }
+	mount_ofs -o ro "$img"
+	python3 -I - "$mnt" <<'PY' || fail "$kind: xattrs mounted again"
+import os, sys
+m = sys.argv[1]
+assert os.getxattr(os.path.join(m, 'EINS.TXT'), 'user.comment') == b'Ein deutlich laengerer Kommentar' * 40
+assert os.getxattr(os.path.join(m, 'DREI.TXT'), 'user.b') == b'B' * 3000
+PY
+	bpc=$(( $(od -An -tu2 -j11 -N2 "$img") * $(od -An -tu1 -j13 -N1 "$img") ))
+	rm -f "$work/eadata"; cp "$mnt/EA DATA. SF" "$work/eadata"
+	umount_ofs
+	python3 -I "$here/tests/fat_ea_check.py" "$work/eadata" "$bpc" > "$work/sets.txt" || { cat "$work/sets.txt" >&2; fail "$kind: the EA file's layout"; }
+	python3 -I "$here/tests/fat_ea_check.py" --image "$img" > "$work/sets2.txt" && cmp -s "$work/sets.txt" "$work/sets2.txt" ||
+		{ cat "$work/sets2.txt" >&2; fail "$kind: the EA file read from the image"; }
+	grep -q ' EINS.TXT comment:1280$' "$work/sets.txt" && grep -q ' DREI.TXT a:1 b:3000$' "$work/sets.txt" &&
+		[ "$(wc -l < "$work/sets.txt")" -eq 2 ] || { cat "$work/sets.txt" >&2; fail "$kind: the sets"; }
+	echo "$kind EAs passed"
 done
 
 # NTFS: the volume of tests/ntfs_image.sh (it needs udisksctl and ntfs-3g)

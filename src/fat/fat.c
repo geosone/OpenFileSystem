@@ -353,6 +353,7 @@ int ofs_fat_dir_next(struct ofs_fat *v, struct ofs_fat_file *d, ofs_u32 *pos, st
         }
         memcpy(ent->fcb, e, 11);
         ent->pos = *pos;
+        ent->ea = v->bits == 32 ? 0 : rd16(e + 20);
         ent->attr = e[11];
         ent->ntcase = e[12];
         ent->ctime_cs = e[13];
@@ -939,6 +940,12 @@ int ofs_fat_remove(struct ofs_fat *v, struct ofs_fat_file *d, ofs_u32 pos)
     ofs_u32 c;
     int r;
     if ((r = entry_at(v, d, pos)) != 0) return r;
+    if (tmp.ea) {
+        /* its extended attributes first: a damaged EA file keeps none back */
+        r = ofs_fat_ea_drop(v, tmp.ea);
+        if (r == OFS_FAT_EIO || r == OFS_FAT_EWRITE) return r;
+        if ((r = entry_at(v, d, pos)) != 0) return r;
+    }
     if ((r = begin(v)) != 0) return r;
     c = tmp.file.first;
     if ((r = unmark(v, d)) != 0) return r;
@@ -1022,5 +1029,36 @@ int ofs_fat_time(struct ofs_fat *v, struct ofs_fat_file *d, ofs_u32 pos, unsigne
         wr16(se + which + 2, date);
         if (which == OFS_FAT_CREATED) se[13] = cs10;
     }
+    return put_entry(v, d, pos, se);
+}
+
+int ofs_fat_entry_at(struct ofs_fat *v, struct ofs_fat_file *d, ofs_u32 pos, struct ofs_fat_ent *ent)
+{
+    int r = entry_at(v, d, pos);
+    if (!r) *ent = tmp;
+    return r;
+}
+
+int ofs_fat_create_fcb(struct ofs_fat *v, struct ofs_fat_file *d, const char fcb[11], ofs_u8 attr,
+                        ofs_u16 time, ofs_u16 date, ofs_u32 *pos)
+{
+    int r = short_free(v, d, fcb);
+    if (r <= 0) return r ? r : OFS_FAT_EEXIST;
+    if ((r = begin(v)) != 0) return r;
+    memset(se, 0, 32);
+    memcpy(se, fcb, 11);
+    se[11] = (ofs_u8)(attr & ~(OFS_FAT_DIR | OFS_FAT_VOLUME));
+    wr16(se + 14, time); wr16(se + 16, date); wr16(se + 18, date);
+    wr16(se + 22, time); wr16(se + 24, date);
+    if ((r = place(v, d, 1, pos)) != 0) return r;
+    return put_entry(v, d, *pos, se);
+}
+
+int ofs_fat_set_ea(struct ofs_fat *v, struct ofs_fat_file *d, ofs_u32 pos, ofs_u16 handle)
+{
+    int r;
+    if (v->bits == 32) return OFS_FAT_ENOTSUP;
+    if ((r = change(v, d, pos)) != 0) return r;
+    wr16(se + 20, handle);
     return put_entry(v, d, pos, se);
 }

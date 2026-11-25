@@ -22,6 +22,7 @@ add_library(openfilesystem_fat STATIC
   src/exfat/exfat_format.c
   src/exfat/upcase.c
   src/fat/fat.c
+  src/fat/fat_ea.c
   src/fat/fat_format.c
   src/part/part.c
   src/ntfs/ntfs.c)

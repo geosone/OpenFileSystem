@@ -27,6 +27,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
+#include <sys/xattr.h>
 #include <time.h>
 #include <unistd.h>
 #ifndef RENAME_NOREPLACE
@@ -142,6 +143,8 @@ static int err(int r)
     case OFS_EROFS: return -EROFS;
     case OFS_ENOTSUP: return -EOPNOTSUPP;
     case OFS_ENOTEMPTY: return -ENOTEMPTY;
+    case OFS_ENOATTR: return -ENODATA;
+    case OFS_ERANGE: return -ERANGE;
     default: return -EIO;
     }
 }
@@ -227,6 +230,11 @@ static void *op_init(struct fuse_conn_info *conn, struct fuse_config *cfg)
     (void)conn;
     cfg->use_ino = 0;
     cfg->kernel_cache = 0;
+    /* no cached sizes and entries: a change can change another file too
+       (an extended attribute, "EA DATA. SF") */
+    cfg->attr_timeout = 0;
+    cfg->entry_timeout = 0;
+    cfg->negative_timeout = 0;
     return NULL;
 }
 
@@ -486,6 +494,75 @@ static int op_chown(const char *path, uid_t uid, gid_t gid, struct fuse_file_inf
     return 0;
 }
 
+/* Extended attributes: "user.NAME" is the EA NAME (OS/2's and NT's on
+   FAT12/16); other name spaces have none. */
+static const char *ea_name(const char *name)
+{
+    return strncmp(name, "user.", 5) || !name[5] ? NULL : name + 5;
+}
+
+static int op_getxattr(const char *path, const char *name, char *value, size_t size)
+{
+    ofs_u16 n[255], len;
+    struct ofs_node dir;
+    int l, r;
+    const char *ea = ea_name(name);
+    if (!ea || !strcmp(path, "/")) return -ENODATA;
+    if ((r = walk(path, &dir, n, &l))) return r;
+    r = ofs_getea(&vol, &dir, n, (unsigned)l, ea, value, (ofs_u16)(size > 0xFFFF ? 0xFFFF : size), &len);
+    return r == OFS_ENOTSUP ? -ENODATA : r ? err(r) : (int)len;
+}
+
+static int op_listxattr(const char *path, char *list, size_t size)
+{
+    static char names[65536];
+    ofs_u16 n[255], len;
+    struct ofs_node dir;
+    size_t total = 0, i = 0, k;
+    int l, r;
+    if (!strcmp(path, "/")) return 0;
+    if ((r = walk(path, &dir, n, &l))) return r;
+    r = ofs_listea(&vol, &dir, n, (unsigned)l, names, 0xFFFF, &len);
+    if (r == OFS_ENOTSUP) return 0;
+    if (r) return err(r);
+    while (i < len) {
+        k = strlen(names + i) + 1;
+        if (size) {
+            if (total + 5 + k > size) return -ERANGE;
+            memcpy(list + total, "user.", 5);
+            memcpy(list + total + 5, names + i, k);
+        }
+        total += 5 + k;
+        i += k;
+    }
+    return (int)total;
+}
+
+#ifndef OFS_READONLY
+static int op_setxattr(const char *path, const char *name, const char *value, size_t size, int flags)
+{
+    ofs_u16 n[255];
+    struct ofs_node dir;
+    int l, r, how = flags & XATTR_CREATE ? OFS_EA_CREATE : flags & XATTR_REPLACE ? OFS_EA_REPLACE : OFS_EA_SET;
+    const char *ea = ea_name(name);
+    if (!ea || !strcmp(path, "/")) return -EOPNOTSUPP;
+    if (size > 0xFFFF) return -E2BIG;
+    if ((r = walk(path, &dir, n, &l))) return r;
+    return err(ofs_setea(&vol, &dir, n, (unsigned)l, ea, value, (ofs_u16)size, how));
+}
+
+static int op_removexattr(const char *path, const char *name)
+{
+    ofs_u16 n[255];
+    struct ofs_node dir;
+    int l, r;
+    const char *ea = ea_name(name);
+    if (!ea || !strcmp(path, "/")) return -ENODATA;
+    if ((r = walk(path, &dir, n, &l))) return r;
+    return err(ofs_setea(&vol, &dir, n, (unsigned)l, ea, NULL, 0, OFS_EA_REMOVE));
+}
+#endif
+
 static struct fuse_operations ops;
 
 /* ---- start ---- */
@@ -612,8 +689,12 @@ int main(int argc, char **argv)
     ops.utimens = op_utimens;
     ops.chmod = op_chmod;
     ops.chown = op_chown;
+    ops.getxattr = op_getxattr;
+    ops.listxattr = op_listxattr;
 #ifndef OFS_READONLY
     if (vol.caps & OFS_CAP_WRITE) {
+        ops.setxattr = op_setxattr;
+        ops.removexattr = op_removexattr;
         ops.write = op_write;
         ops.create = op_create;
         ops.mkdir = op_mkdir;
