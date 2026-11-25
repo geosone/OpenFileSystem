@@ -52,7 +52,8 @@ check: all test dos-check
 FIRST ?= 1
 SEEDS ?= 8
 FUZZ  ?= 2000
-ntfs-check: $(H)/test_ntfs $(H)/test_ntfs_asan
+ntfs-check: $(H)/test_ntfs $(H)/test_ntfs_asan $(H)/ofsfuse
+	sh tests/ntfs_write.sh
 	sh tests/ntfs_diff.sh $(FIRST) $(SEEDS)
 	sh tests/ntfs_mftfrag.sh
 	sh tests/ntfs_image.sh $(BUILD)/ntfs-fuzz 64 4096 >/dev/null

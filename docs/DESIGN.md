@@ -88,7 +88,8 @@ Selected per build, so a DOS driver links only what it uses:
 
 - `OFS_NARROW`: 32-bit LBAs and sizes, as today.
 - `OFS_FS_FAT`, `OFS_FS_EXFAT`, `OFS_FS_NTFS`, ...: which cores go in.
-- `OFS_READONLY`: no write paths compiled in (NTFS.SYS today).
+- `OFS_READONLY`: no write paths compiled in (a read-only driver such as
+  NTFS.SYS).
 - `OFS_MAX_SECTOR`: 512 or 4096. This decides the static buffer sizes on
   DOS.
 - `OFS_HAVE_ALLOC`, `OFS_HAVE_LOCK`: see above.
@@ -170,7 +171,14 @@ core directly.
   the device's sectors into them, up to `OFS_NTFS_MAXSECT`. Every host
   benefits at once.
 - **NTFS writing in stages**: `caps` grows step by step:
-  1. overwrite in place, no size change;
+  1. overwrite in place, no size change (done 2026-11-25:
+     `ofs_ntfs_set_write` makes a volume writable only when it is NTFS
+     3.x, not dirty, its `$LogFile` clean or empty and Windows not
+     hibernated; `ofs_ntfs_write` writes data that has its clusters,
+     resident data in its MFT record with a new update sequence number,
+     and the file's `$STANDARD_INFORMATION` times and archive bit; NTFS
+     has `OFS_CAP_WRITE` without `OFS_CAP_RESIZE`/`OFS_CAP_CREATE`;
+     `tests/ntfs_write.sh`);
   2. create and resize, with MFT and index updates and `$LogFile` reset;
   3. check.
   Each frontend enables a write operation the moment the table has it.

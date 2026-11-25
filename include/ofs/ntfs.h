@@ -1,13 +1,14 @@
 /* SPDX-License-Identifier: GPL-2.0-or-later */
 #ifndef OFS_NTFS_H
 #define OFS_NTFS_H
-/* NTFS reading, independent of I/O and of DOS.  The on-disk structures as
-   ntfs-3g (include/ntfs-3g/layout.h) describes them.  Read-only: MFT
+/* NTFS, independent of I/O and of DOS.  The on-disk structures as
+   ntfs-3g (include/ntfs-3g/layout.h) describes them.  Reading: MFT
    records with their update sequence fixups, resident and non-resident
    attributes (runlists, sparse runs), attribute lists, the $I30
    directory index ($INDEX_ROOT, $INDEX_ALLOCATION with its $BITMAP),
    compressed files (LZNT1, decompressed in idx 4 KB at a time).
-   Encrypted files are not read (OFS_NTFS_ECOMP).
+   Encrypted files are not read (OFS_NTFS_ECOMP).  Writing in stages,
+   stage 1 so far: overwriting in place (ofs_ntfs_write, see below).
    Device sectors of 512 bytes up to OFS_NTFS_MAXSECT (4096 for 4Kn
    disks).  The interface follows exfat.h, so the DOS
    redirector of EXFAT.SYS can serve NTFS too. */
@@ -26,6 +27,11 @@
 #define OFS_NTFS_EBAD   -2       /* not NTFS or damaged */
 #define OFS_NTFS_ESIZE  -3       /* sector, record or index size not supported */
 #define OFS_NTFS_ECOMP  -6       /* encrypted data (or compressed other than LZNT1) */
+#define OFS_NTFS_EWRITE -7       /* sector write failed */
+#define OFS_NTFS_EROFS  -8       /* not writable: no write function, or the volume
+                                     is dirty, hibernated, of another version, or
+                                     its $LogFile not clean; a system file */
+#define OFS_NTFS_ENOSPACE -9     /* the write needs space or a size change (not yet) */
 
 /* attributes as DOS has them */
 #define OFS_NTFS_RDONLY 0x01
@@ -38,11 +44,13 @@
 #define OFS_NTFS_MFTRUNS 16
 
 typedef int (*ofs_ntfs_read_fn)(void *dev, ofs_lba lba, void OFS_FAR *buf);
+typedef int (*ofs_ntfs_write_fn)(void *dev, ofs_lba lba, const void OFS_FAR *buf);
 
 struct ofs_ntfs_run { ofs_u32 vcn, len, lcn; };   /* lcn all ones: sparse */
 
 struct ofs_ntfs {
     ofs_ntfs_read_fn read;
+    ofs_ntfs_write_fn write;     /* set by ofs_ntfs_set_write, else 0 */
     void *dev;
     ofs_lba start;               /* first sector of the volume */
     ofs_u8 sshift;               /* device sector size, a shift (9-12) */
@@ -114,4 +122,18 @@ int ofs_ntfs_free(struct ofs_ntfs *, ofs_u32 *free_clusters);
    ("~n" for the n-th long name with the same basis). */
 int ofs_ntfs_short(struct ofs_ntfs *, struct ofs_ntfs_file *dir, const struct ofs_ntfs_ent *, char fcb[11]);
 int ofs_ntfs_lookup(struct ofs_ntfs *, struct ofs_ntfs_file *dir, const char fcb[11], struct ofs_ntfs_ent *);
+#ifndef OFS_READONLY
+/* Writing, stage 1: data overwritten where it is (no allocation, no size
+   change).  ofs_ntfs_set_write allows it when the volume is NTFS 3.x,
+   not dirty, its $LogFile clean and Windows not hibernated on it
+   (hiberfil.sys); else OFS_NTFS_EROFS and the volume stays read-only. */
+int ofs_ntfs_set_write(struct ofs_ntfs *, ofs_ntfs_write_fn);
+/* len bytes at off, all within the file's initialized data and its
+   clusters (OFS_NTFS_ENOSPACE else: holes, past the valid size), not in
+   a compressed or encrypted file (OFS_NTFS_ECOMP).  The file's
+   $STANDARD_INFORMATION gets the time written (the DOS local time and
+   date, date 0: unchanged) and the archive bit. */
+int ofs_ntfs_write(struct ofs_ntfs *, struct ofs_ntfs_file *, ofs_fsize off, const void OFS_FAR *buf,
+                   ofs_u16 len, ofs_u16 *done, ofs_u16 time, ofs_u16 date);
+#endif
 #endif

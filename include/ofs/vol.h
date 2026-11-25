@@ -52,8 +52,12 @@
 #define OFS_ATTR_DIR    0x10
 #define OFS_ATTR_ARCH   0x20
 
-/* what a mounted volume can do */
-#define OFS_CAP_WRITE 0x01
+/* what a mounted volume can do: write into files; and with it change their
+   sizes; create, remove and rename names (else OFS_ENOTSUP).  NTFS has
+   only OFS_CAP_WRITE so far (stage 1: overwriting in place). */
+#define OFS_CAP_WRITE  0x01
+#define OFS_CAP_RESIZE 0x02
+#define OFS_CAP_CREATE 0x04
 
 /* The host: sector access and the clock. */
 typedef int (*ofs_read_fn)(void *dev, ofs_lba lba, void OFS_FAR *buf);

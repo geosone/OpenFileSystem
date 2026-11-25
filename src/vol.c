@@ -300,7 +300,7 @@ static const struct ofs_fs fs_exfat = {
 };
 #endif
 
-/* ---- NTFS (read-only) ---- */
+/* ---- NTFS (writing: stage 1, overwriting in place) ---- */
 #ifndef OFS_NO_NTFS
 static int nt_mount(struct ofs_vol *v, ofs_lba start, const struct ofs_cp *cp, ofs_u8 *buf)
 {
@@ -311,6 +311,11 @@ static int nt_mount(struct ofs_vol *v, ofs_lba start, const struct ofs_cp *cp, o
     v->type = "NTFS";
     v->dirty = x->dirty;
     label16(v, x->label, x->label_len);
+#ifndef OFS_READONLY
+    /* writable only when the core finds the volume safe to write (else
+       x->write stays 0 and the volume read-only) */
+    if (v->host.write) ofs_ntfs_set_write(x, (ofs_ntfs_write_fn)v->host.write);
+#endif
     return 0;
 }
 
@@ -332,7 +337,18 @@ static void nt_ent(struct ofs_dirent *de)
     n->u.ntfs = nent.file;
 }
 
-static int nt_err(int r) { return r == OFS_NTFS_ECOMP ? OFS_ENOTSUP : r; }
+static int nt_err(int r)
+{
+    switch (r) {
+    case OFS_NTFS_ECOMP: return OFS_ENOTSUP;
+#ifndef OFS_READONLY
+    case OFS_NTFS_EWRITE: return OFS_EWRITE;
+    case OFS_NTFS_EROFS: return OFS_EROFS;
+    case OFS_NTFS_ENOSPACE: return OFS_ENOTSUP;   /* not yet: no allocation, no size change */
+#endif
+    default: return r;                          /* EIO, EBAD and ESIZE are the same */
+    }
+}
 
 static int nt_next(struct ofs_vol *v, struct ofs_node *dir, ofs_u32 *pos, struct ofs_dirent *de)
 {
@@ -370,10 +386,25 @@ static int nt_statfs(struct ofs_vol *v, ofs_u32 *fr, ofs_u32 *cb, ofs_u32 *cl)
     return ofs_ntfs_free(&v->u.ntfs, fr);
 }
 
+#ifndef OFS_READONLY
+static int nt_write(struct ofs_vol *v, struct ofs_node *n, ofs_fsize off, const void OFS_FAR *buf, ofs_u16 len,
+                    ofs_u16 *done)
+{
+    ofs_u16 t = 0, d = 0;
+    if (v->host.now) v->host.now(v->dev, &t, &d);
+    return nt_err(ofs_ntfs_write(&v->u.ntfs, &n->u.ntfs, off, buf, len, done, t, d));
+}
+#endif
+
 static const struct ofs_fs fs_ntfs = {
     ofs_ntfs_probe, nt_mount, nt_root, nt_next, nt_lookup, nt_read, nt_statfs
 #ifndef OFS_READONLY
-    , NULL, NULL, NULL, NULL, NULL, NULL, NULL, 0
+    , nt_write, NULL, NULL, NULL, NULL, NULL, NULL,
+#ifdef OFS_NARROW
+    0xFFFFFFFFUL
+#else
+    ~(ofs_fsize)0
+#endif
 #endif
 };
 #endif
@@ -556,7 +587,14 @@ int ofs_mount(struct ofs_vol *v, const struct ofs_host *host, void *dev, ofs_lba
         if (!v->fs) return r;
     }
 #ifndef OFS_READONLY
-    if (host->write && v->fs->write) v->caps |= OFS_CAP_WRITE;
+    if (host->write && v->fs->write) {
+#ifndef OFS_NO_NTFS
+        if (v->fs == &fs_ntfs && !v->u.ntfs.write) return 0;   /* not safe to write */
+#endif
+        v->caps |= OFS_CAP_WRITE;
+        if (v->fs->resize) v->caps |= OFS_CAP_RESIZE;
+        if (v->fs->create) v->caps |= OFS_CAP_CREATE;
+    }
 #endif
     return 0;
 }
@@ -635,9 +673,12 @@ int ofs_write(struct ofs_vol *v, struct ofs_node *n, ofs_fsize off, const void O
     return 0;
 }
 
+#define CAN(v, c) if (!((v)->caps & (c))) return OFS_ENOTSUP
+
 int ofs_resize(struct ofs_vol *v, struct ofs_node *n, ofs_fsize size)
 {
     WRITABLE(v);
+    CAN(v, OFS_CAP_RESIZE);
     if (n->dir) return OFS_EISDIR;
     if (size > v->fs->max_size) return OFS_EFULL;
     return v->fs->resize(v, n, size);
@@ -649,6 +690,7 @@ int ofs_create(struct ofs_vol *v, struct ofs_node *dir, const ofs_u16 *name, uns
     ofs_u32 pos;
     int r;
     WRITABLE(v);
+    CAN(v, OFS_CAP_CREATE);
     if (!dir->dir) return OFS_ENOTDIR;
     if (!len || len > 255) return OFS_ENAME;
     r = ofs_lookup(v, dir, name, len, out);
@@ -677,6 +719,7 @@ int ofs_remove(struct ofs_vol *v, struct ofs_node *dir, const ofs_u16 *name, uns
     ofs_u32 pos;
     int r;
     WRITABLE(v);
+    CAN(v, OFS_CAP_CREATE);
     if ((r = ofs_lookup(v, dir, name, len, &de))) return r;
     if ((r = entry_pos(v, &de.node, &pos))) return r;
     if (de.node.dir) {
@@ -694,6 +737,7 @@ int ofs_rename(struct ofs_vol *v, struct ofs_node *dir, const ofs_u16 *name, uns
     ofs_u32 pos;
     int r;
     WRITABLE(v);
+    CAN(v, OFS_CAP_CREATE);
     if (!dir->dir || !to->dir) return OFS_ENOTDIR;
     if (!to_len || to_len > 255) return OFS_ENAME;
     r = ofs_lookup(v, to, to_name, to_len, &de);
@@ -706,7 +750,7 @@ int ofs_rename(struct ofs_vol *v, struct ofs_node *dir, const ofs_u16 *name, uns
 
 int ofs_sync(struct ofs_vol *v)
 {
-    if (!(v->caps & OFS_CAP_WRITE)) return 0;
+    if (!(v->caps & OFS_CAP_WRITE) || !v->fs->sync) return 0;
     return v->fs->sync(v);
 }
 #endif

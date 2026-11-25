@@ -24,7 +24,7 @@ GonWare.
 | Image tool | `tools/ofimg.c` | host tool: formats an exFAT volume in a disk image (a partition or a superfloppy), makes directories and puts files, without mounting it (mtools knows no exFAT): `ofimg IMAGE START format SECTORS [LABEL] mkdir PATH put FILE PATH …` |
 | Common interface | `src/vol.c`, `include/ofs/vol.h` | one interface over every core (`ofs_mount`, `ofs_next`, `ofs_lookup`, `ofs_read`, `ofs_write`, `ofs_create`, `ofs_remove`, `ofs_rename`, `ofs_resize`, `ofs_sync`): the host gives its sector access once (`struct ofs_host`), the frontends never touch a core; cores left out with `OFS_NO_FAT`/`OFS_NO_EXFAT`/`OFS_NO_NTFS`, every write path with `OFS_READONLY` (docs/DESIGN.md) |
 | FUSE | `hosts/posix/ofsfuse.c` | `ofsfuse [-o part=N] [-o ro] [-o sector=512] [-o cp=850] IMAGE MOUNTPOINT`: a FAT, exFAT, NTFS, ISO 9660 or UDF volume of an image (the whole image or a partition) mounted through FUSE 3 over the common interface, to test the cores with Linux tools |
-| NTFS | `src/ntfs/ntfs.c` | read-only: MFT records, runlists (fragmented and sparse files), attribute lists, directory indexes, 8.3 names (the DOS names Windows gave, else `~` and the record number in base 36), label, free space, compressed files (LZNT1); not encrypted files; sectors of 512 to 4096 bytes (`OFS_NTFS_MAXSECT`, 512 by default) |
+| NTFS | `src/ntfs/ntfs.c` | writing in stages, stage 1 so far: data overwritten in place, no allocation or size change, only on a volume Windows left clean (`ofs_ntfs_set_write`: not dirty, `$LogFile` clean, not hibernated); `ofs_vol` gives it `OFS_CAP_WRITE` without `OFS_CAP_RESIZE`/`OFS_CAP_CREATE`. Reading: MFT records, runlists (fragmented and sparse files), attribute lists, directory indexes, 8.3 names (the DOS names Windows gave, else `~` and the record number in base 36), label, free space, compressed files (LZNT1); not encrypted files; sectors of 512 to 4096 bytes (`OFS_NTFS_MAXSECT`, 512 by default) |
 | ISO 9660 | `src/iso9660/iso9660.c` | read-only: Rock Ridge names (NM, continuation areas, relocated deep directories), else Joliet (also long names), else the plain names without `;1`; files of several extents (over 4 GiB) as one; label; device sectors of 512 to 2048 bytes (an image, a USB stick, a CD drive); no interleaved files |
 | UDF | `src/udf/udf.c` | read-only (discs are made by burning software): UDF 1.02 to 2.60, physical, sparable and metadata partitions, file entries and extended file entries, short/long/extended allocation descriptors with continuation, data inside the ICB, unrecorded extents as zeros, 8- and 16-bit names; logical blocks of 512 to 4096 bytes; no virtual partition (VAT) |
 | GonWare | `hosts/gonware/ofsgw.c` | one driver of GonWare's volume layer over the common interface, built per module with the cores it carries (FAT.GLM, NTFS.GLM) |
@@ -49,7 +49,7 @@ make            # host test programs and ofimg in build/host
 make test       # quick tests
 make dos-check  # every source as a 16-bit DOS object (OpenWatcom, WATCOM=/opt/watcom)
 make check      # everything, including the image tests
-make ntfs-check # NTFS against ntfs-3g (random trees, all cluster sizes), fuzzing
+make ntfs-check # NTFS overwriting (tests/ntfs_write.sh), against ntfs-3g (random trees, all cluster sizes), fuzzing
 make fuse       # build/host/ofsfuse (needs FUSE 3: pkg-config fuse3)
 make fuse-check # the cores through ofsfuse against mkfs, fsck, xorriso, mkisofs -udf, mkudffs and the Linux drivers (ISO_BIG=1: also a 4.5 GiB file on ISO 9660)
 ```

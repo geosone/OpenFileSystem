@@ -1016,3 +1016,220 @@ int ofs_ntfs_free(struct ofs_ntfs *v, ofs_u32 *free_clusters)
     *free_clusters = c;
     return OFS_NTFS_OK;
 }
+
+#ifndef OFS_READONLY
+/* ---- writing, stage 1: overwriting in place ----
+   Data that has its clusters (or its place in the MFT record) is written
+   where it is; nothing is allocated, no size changes, so the volume's
+   metadata stays as it was but for the file's $STANDARD_INFORMATION
+   (its times and the archive bit) and a resident value.  Those MFT
+   records are written with a new update sequence number.  $LogFile is
+   not written: the volume is only written when Windows left it clean
+   (ofs_ntfs_set_write), so it has nothing to replay over our changes. */
+
+static void wr16(ofs_u8 *p, ofs_u16 x) { p[0] = (ofs_u8)x; p[1] = (ofs_u8)(x >> 8); }
+static void wr32(ofs_u8 *p, ofs_u32 x) { wr16(p, (ofs_u16)x); wr16(p + 2, (ofs_u16)(x >> 16)); }
+
+/* the device sector in buf back to the device */
+static int buf_flush(struct ofs_ntfs *v)
+{
+    if (v->write(v->dev, v->start + v->buf_lba, v->buf)) { v->buf_lba = NOBUF; return OFS_NTFS_EWRITE; }
+    return OFS_NTFS_OK;
+}
+
+/* n bytes from src at offset in of block lba */
+static int blk_patch(struct ofs_ntfs *v, ofs_lba lba, unsigned in, const ofs_u8 OFS_FAR *src, unsigned n)
+{
+    ofs_u8 *s;
+    if (v->sshift == 9 && !in && n == 512) {    /* a whole sector */
+        if (v->buf_lba == lba) v->buf_lba = NOBUF;
+        return v->write(v->dev, v->start + lba, src) ? OFS_NTFS_EWRITE : OFS_NTFS_OK;
+    }
+    if (!(s = (ofs_u8 *)sector(v, lba))) return OFS_NTFS_EIO;
+    fmemcpy(s + in, src, n);
+    return buf_flush(v);
+}
+
+/* MFT record no from b (as load_rec left it, fixups undone), with the
+   next update sequence number; b stays as it was */
+static int write_rec(struct ofs_ntfs *v, ofs_u32 no, ofs_u8 *b)
+{
+    unsigned n = v->rec_size / 512, ofs = rd16(b + 4), cnt = rd16(b + 6), i;
+    ofs_u16 usn = (ofs_u16)(rd16(b + ofs) + 1);
+    ofs_lba lba;
+    int rc = OFS_NTFS_OK;
+    if (cnt != n + 1 || ofs + 2 * cnt > 512) return OFS_NTFS_EBAD;
+    if (!usn || usn == 0xFFFF) usn = 1;
+    /* the other cache must not keep the record as it was */
+    if (b != v->rec && v->rec_no == no) v->rec_no = NONE;
+    if (b != v->rec2 && v->rec2_no == no) v->rec2_no = NONE;
+    wr16(b + ofs, usn);
+    for (i = 1; i < cnt; ++i) {                 /* the last word of each block into the array */
+        b[ofs + 2 * i] = b[i * 512 - 2];
+        b[ofs + 2 * i + 1] = b[i * 512 - 1];
+        wr16(b + i * 512 - 2, usn);
+    }
+    for (i = 0; i < n && !rc; ++i)
+        if (!(rc = mft_sector(v, no * n + i, &lba))) rc = blk_patch(v, lba, 0, b + i * 512, 512);
+    for (i = 1; i < cnt; ++i) {
+        b[i * 512 - 2] = b[ofs + 2 * i];
+        b[i * 512 - 1] = b[ofs + 2 * i + 1];
+    }
+    return rc;
+}
+
+/* DOS local time -> NTFS time (100 ns from 1601, UTC) */
+static ofs_u64 nt_time(ofs_u16 time, ofs_u16 date, ofs_s16 tz)
+{
+    ofs_u32 y = 1980 + (date >> 9), m = date >> 5 & 15, d = date & 31, era, yoe, doy, doe, days;
+    ofs_u64 t;
+    if (m < 1 || m > 12) m = 1;
+    if (!d) d = 1;
+    /* days from civil (Howard Hinnant), from 1970-01-01 */
+    y -= m <= 2;
+    era = y / 400; yoe = y - era * 400;
+    doy = (153 * (m > 2 ? m - 3 : m + 9) + 2) / 5 + d - 1;
+    doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    days = era * 146097 + doe - 719468UL;
+    t = (ofs_u64)days * 86400 + (ofs_u32)(time >> 11) * 3600 + (time >> 5 & 63) * 60 + (time & 31) * 2;
+    if (tz < 0) t += (ofs_u32)-tz * 60UL; else t -= (ofs_u32)tz * 60UL;   /* to UTC */
+    return (t + 11644473600UL) * 10000000UL;
+}
+
+/* $LogFile's restart pages (through idx): the later one (by its LSN) must
+   say the volume is clean -- no client in use, or the clean flag (as
+   ntfs-3g's ntfs_check_logfile takes it).  An empty $LogFile (all 0xFF,
+   as mkntfs and ntfs-3g leave it; Windows sets it up anew) is clean. */
+static int log_clean(struct ofs_ntfs *v)
+{
+    struct ofs_ntfs_ent e;
+    ofs_u32 at = 0, psize = 4096, p, hi, lo, best_hi = 0, best_lo = 0;
+    unsigned pg, ra, clean = 0, any = 0, empty = 0, i;
+    ofs_u16 done;
+    int rc;
+    if ((rc = stat_rec(v, 2, &e))) return rc == OFS_NTFS_END ? OFS_NTFS_EBAD : rc;
+    if (e.file.nofat) return OFS_NTFS_EROFS;
+    for (pg = 0; pg < 2; ++pg, at = psize) {   /* the second at the first's page size */
+        v->idx_no = NONE;
+        if ((rc = ofs_ntfs_read(v, &e.file, at, v->idx, 512, &done))) return rc;
+        if (done < 512) return OFS_NTFS_EROFS;
+        if (!memcmp(v->idx, "CHKD", 4)) return OFS_NTFS_EROFS;  /* chkdsk left it */
+        if (memcmp(v->idx, "RSTR", 4)) {
+            for (i = 0; i < 512 && v->idx[i] == 0xFF; ++i) ;
+            empty += i == 512;
+            continue;
+        }
+        p = rd32(v->idx + 0x10);               /* the system page size */
+        if (p < 512 || p > OFS_NTFS_MAXREC || (p & (p - 1))) return OFS_NTFS_EROFS;
+        if (!pg) psize = p;
+        if ((rc = ofs_ntfs_read(v, &e.file, at, v->idx, (ofs_u16)p, &done))) return rc;
+        if (done < p || fixup(v->idx, (unsigned)p)) continue;
+        ra = rd16(v->idx + 0x18);
+        if (ra + 0x10 > p) continue;
+        lo = rd32(v->idx + ra); hi = rd32(v->idx + ra + 4);
+        if (any && (hi < best_hi || (hi == best_hi && lo <= best_lo))) continue;
+        any = 1; best_hi = hi; best_lo = lo;
+        clean = rd16(v->idx + ra + 0x0C) == 0xFFFF || (rd16(v->idx + ra + 0x0E) & 2);
+    }
+    v->idx_no = NONE;
+    if (!any) return empty == 2 ? OFS_NTFS_OK : OFS_NTFS_EROFS;
+    return clean ? OFS_NTFS_OK : OFS_NTFS_EROFS;
+}
+
+int ofs_ntfs_set_write(struct ofs_ntfs *v, ofs_ntfs_write_fn write)
+{
+    static const char hiber[11] = { 'H','I','B','E','R','F','I','L','S','Y','S' };
+    struct ofs_ntfs_ent e;
+    struct ofs_ntfs_file root;
+    const ofs_u8 *a, *val;
+    ofs_u32 len;
+    ofs_u16 done;
+    int rc;
+    v->write = 0;
+    if (!write || v->dirty) return OFS_NTFS_EROFS;
+    /* NTFS 3.0 and 3.1 only (Windows 2000 and later) */
+    if ((rc = load_rec(v, 3, v->rec, &v->rec_no))) return rc == OFS_NTFS_END ? OFS_NTFS_EBAD : rc;
+    if (!(a = find_attr(v, v->rec, AT_VINFO, 0)) || !(val = res_value(a, &len)) || len < 12 ||
+        val[8] != 3 || val[9] > 1)
+        return OFS_NTFS_EROFS;
+    if ((rc = log_clean(v))) return rc;
+    /* hibernated Windows (also its fast startup) keeps the volume open */
+    ofs_ntfs_rootdir(v, &root);
+    rc = ofs_ntfs_lookup(v, &root, hiber, &e);
+    if (!rc && e.file.size >= 4) {
+        ofs_u8 h[4];
+        if ((rc = ofs_ntfs_read(v, &e.file, 0, h, 4, &done))) return rc;
+        if (done == 4 && (!memcmp(h, "hibr", 4) || !memcmp(h, "HIBR", 4))) return OFS_NTFS_EROFS;
+    } else if (rc != OFS_NTFS_END && rc != OFS_NTFS_OK) {
+        return rc;
+    }
+    v->write = write;
+    return OFS_NTFS_OK;
+}
+
+/* $STANDARD_INFORMATION of record no: written now, the archive bit */
+static int touch(struct ofs_ntfs *v, ofs_u32 no, ofs_u16 time, ofs_u16 date)
+{
+    ofs_u8 *val;
+    const ofs_u8 *a;
+    ofs_u32 len;
+    ofs_u64 t;
+    int rc;
+    if ((rc = load_rec(v, no, v->rec2, &v->rec2_no))) return rc == OFS_NTFS_END ? OFS_NTFS_EBAD : rc;
+    if (!(a = find_attr(v, v->rec2, AT_STD, 0)) || !(val = (ofs_u8 *)res_value(a, &len)) || len < 36)
+        return OFS_NTFS_EBAD;
+    if (date) {
+        t = nt_time(time, date, v->tz);
+        wr32(val + 0x08, (ofs_u32)t); wr32(val + 0x0C, (ofs_u32)(t >> 32));   /* written */
+        wr32(val + 0x10, (ofs_u32)t); wr32(val + 0x14, (ofs_u32)(t >> 32));   /* record changed */
+    }
+    wr32(val + 0x20, rd32(val + 0x20) | OFS_NTFS_ARCH);
+    return write_rec(v, no, v->rec2);
+}
+
+int ofs_ntfs_write(struct ofs_ntfs *v, struct ofs_ntfs_file *f, ofs_fsize off, const void OFS_FAR *buf,
+                   ofs_u16 len, ofs_u16 *done, ofs_u16 time, ofs_u16 date)
+{
+    const ofs_u8 OFS_FAR *in8 = (const ofs_u8 OFS_FAR *)buf;
+    const ofs_u8 *a;
+    ofs_u8 *val;
+    ofs_u32 vlen, sec, vcn;
+    struct ofs_ntfs_run r;
+    unsigned in, n;
+    ofs_lba lba;
+    int rc;
+    *done = 0;
+    if (!v->write) return OFS_NTFS_EROFS;
+    if (f->root || f->first < 16) return OFS_NTFS_EROFS;
+    if (f->nofat == 2 || f->nofat == 3) return OFS_NTFS_ECOMP;
+    if (!len) return OFS_NTFS_OK;
+    /* not past the initialized data: that would change the sizes */
+    if (off >= f->valid || len > f->valid - off) return OFS_NTFS_ENOSPACE;
+    if (f->nofat == 1) {                            /* resident: in the record */
+        if ((rc = data_attr(v, f->first, 0, &a))) return rc;
+        if (!(val = (ofs_u8 *)res_value(a, &vlen)) || off + len > vlen) return OFS_NTFS_EBAD;
+        fmemcpy(val + (unsigned)off, in8, len);
+        if ((rc = write_rec(v, v->rec2_no, v->rec2))) return rc;
+        *done = len;
+        return touch(v, f->first, time, date);
+    }
+    while (len) {
+        in = (unsigned)off & 511;
+        n = 512 - in;
+        if (n > len) n = len;
+        sec = (ofs_u32)(off >> 9);
+        vcn = sec >> v->cshift;
+        if (!f->rlen || vcn < f->idx || vcn - f->idx >= f->rlen) {
+            if ((rc = data_attr(v, f->first, vcn, &a))) return rc;
+            if (!a[8]) return OFS_NTFS_EBAD;
+            if ((rc = attr_run(a, vcn, &r))) return rc == OFS_NTFS_END ? OFS_NTFS_EBAD : rc;
+            f->idx = r.vcn; f->clu = r.lcn; f->rlen = r.len;
+        }
+        if (f->clu == NONE) return *done ? touch(v, f->first, time, date) : OFS_NTFS_ENOSPACE;   /* a hole */
+        lba = ((ofs_lba)(f->clu + (vcn - f->idx)) << v->cshift) + (sec & ((1UL << v->cshift) - 1));
+        if ((rc = blk_patch(v, lba, in, in8, n))) return rc;
+        in8 += n; off += n; len -= (ofs_u16)n; *done += (ofs_u16)n;
+    }
+    return touch(v, f->first, time, date);
+}
+#endif
