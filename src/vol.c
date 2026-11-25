@@ -300,7 +300,7 @@ static const struct ofs_fs fs_exfat = {
 };
 #endif
 
-/* ---- NTFS (writing: stage 1, overwriting in place) ---- */
+/* ---- NTFS (writing in stages: overwriting, sizes) ---- */
 #ifndef OFS_NO_NTFS
 static int nt_mount(struct ofs_vol *v, ofs_lba start, const struct ofs_cp *cp, ofs_u8 *buf)
 {
@@ -344,7 +344,8 @@ static int nt_err(int r)
 #ifndef OFS_READONLY
     case OFS_NTFS_EWRITE: return OFS_EWRITE;
     case OFS_NTFS_EROFS: return OFS_EROFS;
-    case OFS_NTFS_ENOSPACE: return OFS_ENOTSUP;   /* not yet: no allocation, no size change */
+    case OFS_NTFS_ENOSPACE: return OFS_ENOTSUP;   /* not yet (a hole, a runlist too large ...) */
+    case OFS_NTFS_EFULL: return OFS_EFULL;
 #endif
     default: return r;                          /* EIO, EBAD and ESIZE are the same */
     }
@@ -391,15 +392,28 @@ static int nt_write(struct ofs_vol *v, struct ofs_node *n, ofs_fsize off, const 
                     ofs_u16 *done)
 {
     ofs_u16 t = 0, d = 0;
+    int r;
     if (v->host.now) v->host.now(v->dev, &t, &d);
-    return nt_err(ofs_ntfs_write(&v->u.ntfs, &n->u.ntfs, off, buf, len, done, t, d));
+    r = ofs_ntfs_write(&v->u.ntfs, &n->u.ntfs, off, buf, len, done, t, d);
+    n->size = n->u.ntfs.size;
+    return nt_err(r);
+}
+
+static int nt_resize(struct ofs_vol *v, struct ofs_node *n, ofs_fsize size)
+{
+    ofs_u16 t = 0, d = 0;
+    int r;
+    if (v->host.now) v->host.now(v->dev, &t, &d);
+    r = ofs_ntfs_resize(&v->u.ntfs, &n->u.ntfs, size, t, d);
+    n->size = n->u.ntfs.size;
+    return nt_err(r);
 }
 #endif
 
 static const struct ofs_fs fs_ntfs = {
     ofs_ntfs_probe, nt_mount, nt_root, nt_next, nt_lookup, nt_read, nt_statfs
 #ifndef OFS_READONLY
-    , nt_write, NULL, NULL, NULL, NULL, NULL, NULL,
+    , nt_write, nt_resize, NULL, NULL, NULL, NULL, NULL,
 #ifdef OFS_NARROW
     0xFFFFFFFFUL
 #else

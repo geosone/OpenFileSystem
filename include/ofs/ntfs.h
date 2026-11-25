@@ -7,8 +7,9 @@
    attributes (runlists, sparse runs), attribute lists, the $I30
    directory index ($INDEX_ROOT, $INDEX_ALLOCATION with its $BITMAP),
    compressed files (LZNT1, decompressed in idx 4 KB at a time).
-   Encrypted files are not read (OFS_NTFS_ECOMP).  Writing in stages,
-   stage 1 so far: overwriting in place (ofs_ntfs_write, see below).
+   Encrypted files are not read (OFS_NTFS_ECOMP).  Writing in stages:
+   overwriting in place and sizes so far (ofs_ntfs_write and
+   ofs_ntfs_resize, see below).
    Device sectors of 512 bytes up to OFS_NTFS_MAXSECT (4096 for 4Kn
    disks).  The interface follows exfat.h, so the DOS
    redirector of EXFAT.SYS can serve NTFS too. */
@@ -31,7 +32,9 @@
 #define OFS_NTFS_EROFS  -8       /* not writable: no write function, or the volume
                                      is dirty, hibernated, of another version, or
                                      its $LogFile not clean; a system file */
-#define OFS_NTFS_ENOSPACE -9     /* the write needs space or a size change (not yet) */
+#define OFS_NTFS_ENOSPACE -9     /* not yet: a hole, data in an extension record,
+                                     a runlist larger than its record */
+#define OFS_NTFS_EFULL  -10      /* no free cluster */
 
 /* attributes as DOS has them */
 #define OFS_NTFS_RDONLY 0x01
@@ -77,6 +80,12 @@ struct ofs_ntfs {
     ofs_lba buf_lba;             /* device sector in buf, or all ones */
     ofs_u32 rec_no, rec2_no, idx_no;   /* what they hold, or all ones */
     ofs_u32 idx_dir;             /* the directory of idx */
+    ofs_lba idx_lba[OFS_NTFS_MAXREC / 512];   /* the blocks of idx's index block */
+    /* writing: the runs of $Bitmap (0: none known, no allocation), where
+       the last allocation ended, $LogFile emptied */
+    struct ofs_ntfs_run bmr[4];
+    ofs_u8 bm_nruns, log_reset;
+    ofs_u32 bm_hint;
 };
 
 /* A file or directory: its MFT record, size, and the run last used. */
@@ -128,12 +137,18 @@ int ofs_ntfs_lookup(struct ofs_ntfs *, struct ofs_ntfs_file *dir, const char fcb
    not dirty, its $LogFile clean and Windows not hibernated on it
    (hiberfil.sys); else OFS_NTFS_EROFS and the volume stays read-only. */
 int ofs_ntfs_set_write(struct ofs_ntfs *, ofs_ntfs_write_fn);
-/* len bytes at off, all within the file's initialized data and its
-   clusters (OFS_NTFS_ENOSPACE else: holes, past the valid size), not in
-   a compressed or encrypted file (OFS_NTFS_ECOMP).  The file's
+/* len bytes at off, not in a compressed or encrypted file
+   (OFS_NTFS_ECOMP) nor in a hole of a sparse file (OFS_NTFS_ENOSPACE);
+   past the end the file grows first (ofs_ntfs_resize), past the
+   initialized size the bytes up to off become zeros.  The file's
    $STANDARD_INFORMATION gets the time written (the DOS local time and
    date, date 0: unchanged) and the archive bit. */
 int ofs_ntfs_write(struct ofs_ntfs *, struct ofs_ntfs_file *, ofs_fsize off, const void OFS_FAR *buf,
                    ofs_u16 len, ofs_u16 *done, ofs_u16 time, ofs_u16 date);
+/* Stage 2a: the file's size (its $DATA one attribute in the base record):
+   clusters from $Bitmap or back to it, resident data moved out when it no
+   longer fits; the new bytes read as zeros.  OFS_NTFS_EFULL: no space,
+   OFS_NTFS_ENOSPACE: not yet so (see above). */
+int ofs_ntfs_resize(struct ofs_ntfs *, struct ofs_ntfs_file *, ofs_fsize size, ofs_u16 time, ofs_u16 date);
 #endif
 #endif

@@ -54,7 +54,7 @@
 
 /* what a mounted volume can do: write into files; and with it change their
    sizes; create, remove and rename names (else OFS_ENOTSUP).  NTFS has
-   only OFS_CAP_WRITE so far (stage 1: overwriting in place). */
+   OFS_CAP_WRITE and OFS_CAP_RESIZE so far (stages 1 and 2a). */
 #define OFS_CAP_WRITE  0x01
 #define OFS_CAP_RESIZE 0x02
 #define OFS_CAP_CREATE 0x04

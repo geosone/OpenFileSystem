@@ -177,9 +177,20 @@ core directly.
      hibernated; `ofs_ntfs_write` writes data that has its clusters,
      resident data in its MFT record with a new update sequence number,
      and the file's `$STANDARD_INFORMATION` times and archive bit; NTFS
-     has `OFS_CAP_WRITE` without `OFS_CAP_RESIZE`/`OFS_CAP_CREATE`;
+     has `OFS_CAP_WRITE` (and with 2a `OFS_CAP_RESIZE`) without `OFS_CAP_CREATE`;
      `tests/ntfs_write.sh`);
-  2. create and resize, with MFT and index updates and `$LogFile` reset;
+  2. create and resize, with MFT and index updates and `$LogFile` reset --
+     2a, sizes, done 2026-11-25: `ofs_ntfs_resize` and writing past the
+     end or the initialized size (zeros in between); clusters from
+     `$Bitmap` (the file goes on after its last cluster when it can, else a
+     run of 16 clusters or more, else the longest), the runlist written
+     anew in the base record, resident data moved out when it no longer
+     fits; the sizes and times in the directory index entries (what DIR
+     shows); `$LogFile` emptied before the first change of metadata.
+     Not yet: `$DATA` in an extension record or a runlist larger than its
+     record (an attribute list of its own), holes. `tests/ntfs_check.py`
+     checks the clusters against `$Bitmap`, the attribute sizes and the
+     index entries. 2b, creating; 2c, removing and renaming: open;
   3. check.
   Each frontend enables a write operation the moment the table has it.
   No frontend changes.

@@ -729,6 +729,7 @@ static int load_idx(struct ofs_ntfs *v, ofs_u32 dir, ofs_u32 k)
     v->idx_no = NONE;
     for (i = 0; i < n; ++i) {
         if (blk_read(v, lbas[i], v->idx + i * 512)) return OFS_NTFS_EIO;
+        v->idx_lba[i] = lbas[i];
     }
     if (memcmp(v->idx, "INDX", 4) || fixup(v->idx, v->idx_size)) return OFS_NTFS_EBAD;
     v->idx_dir = dir; v->idx_no = k;
@@ -1029,6 +1030,8 @@ int ofs_ntfs_free(struct ofs_ntfs *v, ofs_u32 *free_clusters)
 
 static void wr16(ofs_u8 *p, ofs_u16 x) { p[0] = (ofs_u8)x; p[1] = (ofs_u8)(x >> 8); }
 static void wr32(ofs_u8 *p, ofs_u32 x) { wr16(p, (ofs_u16)x); wr16(p + 2, (ofs_u16)(x >> 16)); }
+static ofs_u64 rd64(const ofs_u8 *p);
+static int runs_get(const ofs_u8 *a, struct ofs_ntfs_run *rs, unsigned *n);
 
 /* the device sector in buf back to the device */
 static int buf_flush(struct ofs_ntfs *v)
@@ -1050,31 +1053,58 @@ static int blk_patch(struct ofs_ntfs *v, ofs_lba lba, unsigned in, const ofs_u8 
     return buf_flush(v);
 }
 
-/* MFT record no from b (as load_rec left it, fixups undone), with the
-   next update sequence number; b stays as it was */
-static int write_rec(struct ofs_ntfs *v, ofs_u32 no, ofs_u8 *b)
+/* the update sequence of a record or index block of size bytes in memory
+   (as fixup left it) for writing: the next number at the end of each
+   block, their words into the array; usa_open undoes it */
+static int usa_seal(ofs_u8 *b, unsigned size)
 {
-    unsigned n = v->rec_size / 512, ofs = rd16(b + 4), cnt = rd16(b + 6), i;
+    unsigned ofs = rd16(b + 4), cnt = rd16(b + 6), i;
     ofs_u16 usn = (ofs_u16)(rd16(b + ofs) + 1);
-    ofs_lba lba;
-    int rc = OFS_NTFS_OK;
-    if (cnt != n + 1 || ofs + 2 * cnt > 512) return OFS_NTFS_EBAD;
+    if (cnt != size / 512 + 1 || ofs + 2 * cnt > 512) return OFS_NTFS_EBAD;
     if (!usn || usn == 0xFFFF) usn = 1;
-    /* the other cache must not keep the record as it was */
-    if (b != v->rec && v->rec_no == no) v->rec_no = NONE;
-    if (b != v->rec2 && v->rec2_no == no) v->rec2_no = NONE;
     wr16(b + ofs, usn);
-    for (i = 1; i < cnt; ++i) {                 /* the last word of each block into the array */
+    for (i = 1; i < cnt; ++i) {
         b[ofs + 2 * i] = b[i * 512 - 2];
         b[ofs + 2 * i + 1] = b[i * 512 - 1];
         wr16(b + i * 512 - 2, usn);
     }
-    for (i = 0; i < n && !rc; ++i)
-        if (!(rc = mft_sector(v, no * n + i, &lba))) rc = blk_patch(v, lba, 0, b + i * 512, 512);
+    return OFS_NTFS_OK;
+}
+
+static void usa_open(ofs_u8 *b)
+{
+    unsigned ofs = rd16(b + 4), cnt = rd16(b + 6), i;
     for (i = 1; i < cnt; ++i) {
         b[i * 512 - 2] = b[ofs + 2 * i];
         b[i * 512 - 1] = b[ofs + 2 * i + 1];
     }
+}
+
+/* MFT record no from b (as load_rec left it, fixups undone), with the
+   next update sequence number; b stays as it was */
+static int write_rec(struct ofs_ntfs *v, ofs_u32 no, ofs_u8 *b)
+{
+    unsigned n = v->rec_size / 512, i;
+    ofs_lba lba;
+    int rc;
+    /* the other cache must not keep the record as it was */
+    if (b != v->rec && v->rec_no == no) v->rec_no = NONE;
+    if (b != v->rec2 && v->rec2_no == no) v->rec2_no = NONE;
+    if ((rc = usa_seal(b, v->rec_size))) return rc;
+    for (i = 0; i < n && !rc; ++i)
+        if (!(rc = mft_sector(v, no * n + i, &lba))) rc = blk_patch(v, lba, 0, b + i * 512, 512);
+    usa_open(b);
+    return rc;
+}
+
+/* the index block in idx (load_idx) back where it came from */
+static int write_idx(struct ofs_ntfs *v)
+{
+    unsigned n = v->idx_size / 512, i;
+    int rc;
+    if ((rc = usa_seal(v->idx, v->idx_size))) return rc;
+    for (i = 0; i < n && !rc; ++i) rc = blk_patch(v, v->idx_lba[i], 0, v->idx + i * 512, 512);
+    usa_open(v->idx);
     return rc;
 }
 
@@ -1163,61 +1193,481 @@ int ofs_ntfs_set_write(struct ofs_ntfs *v, ofs_ntfs_write_fn write)
     } else if (rc != OFS_NTFS_END && rc != OFS_NTFS_OK) {
         return rc;
     }
+    /* the runs of $Bitmap, for allocating (more than four: no allocation) */
+    v->bm_nruns = 0;
+    if ((rc = load_rec(v, 6, v->rec2, &v->rec2_no))) return rc == OFS_NTFS_END ? OFS_NTFS_EBAD : rc;
+    if ((a = find_attr(v, v->rec2, AT_DATA, 0)) && a[8] && !find_attr(v, v->rec2, AT_LIST, 0)) {
+        struct ofs_ntfs_run *rs = (struct ofs_ntfs_run *)v->idx;
+        unsigned n, i;
+        v->idx_no = NONE;
+        if (!runs_get(a, rs, &n) && n <= 4 && rd64(a + 0x30) * 8 >= v->clusters) {
+            for (i = 0; i < n && rs[i].lcn != NONE; ++i) v->bmr[i] = rs[i];
+            if (i == n) v->bm_nruns = (ofs_u8)n;
+        }
+    }
     v->write = write;
     return OFS_NTFS_OK;
 }
 
-/* $STANDARD_INFORMATION of record no: written now, the archive bit */
-static int touch(struct ofs_ntfs *v, ofs_u32 no, ofs_u16 time, ofs_u16 date)
+/* ---- writing, stage 2a: sizes ----
+   A file's $DATA in its base record (also with an attribute list, as
+   long as $DATA is one attribute there) grows and shrinks: clusters from
+   $Bitmap, the runlist written anew in the record (OFS_NTFS_ENOSPACE when
+   it does not fit), resident data moved out of the record when it no
+   longer fits.  The first change of metadata empties $LogFile (all 0xFF,
+   as ntfs-3g does): Windows sets it up anew and replays nothing over it. */
+
+#define MAXRUNS (OFS_NTFS_MAXREC / sizeof(struct ofs_ntfs_run))   /* in idx */
+
+static void wr64(ofs_u8 *p, ofs_u64 x) { wr32(p, (ofs_u32)x); wr32(p + 4, (ofs_u32)(x >> 32)); }
+static ofs_u64 rd64(const ofs_u8 *p) { return (ofs_u64)rd32(p + 4) << 32 | rd32(p); }
+static ofs_u32 clu_bytes(const struct ofs_ntfs *v) { return 512UL << v->cshift; }
+
+/* the block of $Bitmap with cluster c */
+static int bm_sector(struct ofs_ntfs *v, ofs_u32 c, ofs_u8 **s)
 {
-    ofs_u8 *val;
-    const ofs_u8 *a;
-    ofs_u32 len;
-    ofs_u64 t;
+    ofs_u32 blk = c >> 12, vcn = blk >> v->cshift;
+    unsigned i;
+    for (i = 0; i < v->bm_nruns; ++i)
+        if (vcn >= v->bmr[i].vcn && vcn - v->bmr[i].vcn < v->bmr[i].len) {
+            ofs_lba lba = ((ofs_lba)(v->bmr[i].lcn + (vcn - v->bmr[i].vcn)) << v->cshift) +
+                          (blk & ((1UL << v->cshift) - 1));
+            return (*s = (ofs_u8 *)sector(v, lba)) ? OFS_NTFS_OK : OFS_NTFS_EIO;
+        }
+    return OFS_NTFS_EBAD;
+}
+
+/* n clusters from c in $Bitmap: in use (on) or free */
+static int bm_set(struct ofs_ntfs *v, ofs_u32 c, ofs_u32 n, int on)
+{
+    ofs_u32 blk;
+    ofs_u8 *s, m;
     int rc;
-    if ((rc = load_rec(v, no, v->rec2, &v->rec2_no))) return rc == OFS_NTFS_END ? OFS_NTFS_EBAD : rc;
-    if (!(a = find_attr(v, v->rec2, AT_STD, 0)) || !(val = (ofs_u8 *)res_value(a, &len)) || len < 36)
+    if (c >= v->clusters || n > v->clusters - c) return OFS_NTFS_EBAD;
+    while (n) {
+        blk = c >> 12;
+        if ((rc = bm_sector(v, c, &s))) return rc;
+        for (; n && c >> 12 == blk; ++c, --n) {
+            m = (ofs_u8)(1u << (c & 7));
+            if (!(s[c >> 3 & 511] & m) != !on) {       /* a change */
+                if (v->free != NONE) v->free += on ? (ofs_u32)-1 : 1;
+                s[c >> 3 & 511] ^= m;
+            }
+        }
+        if ((rc = buf_flush(v))) return rc;
+    }
+    return OFS_NTFS_OK;
+}
+
+#define MINRUN 16                       /* a new extent is looked for this long at least */
+
+/* free clusters for want more of a file whose clusters end at hint: those
+   right after it when free (the file goes on in one piece); else, round
+   the volume once from hint, the first run of max(want, MINRUN) (so that
+   the file can go on after it again), else the longest run there is (runs
+   do not wrap).  *lcn, *len (at most want); OFS_NTFS_EFULL: none */
+static int bm_find(struct ofs_ntfs *v, ofs_u32 hint, ofs_u32 want, ofs_u32 *lcn, ofs_u32 *len)
+{
+    ofs_u32 c = hint < v->clusters ? hint : 0, seen, start = 0, run = 0, enough = want > MINRUN ? want : MINRUN;
+    ofs_u8 *s;
+    int rc, used, first = 1;
+    *lcn = 0; *len = 0;
+    for (seen = 0; seen <= v->clusters; ++seen) {
+        used = 1;
+        if (seen < v->clusters) {
+            if ((rc = bm_sector(v, c, &s))) return rc;
+            used = s[c >> 3 & 511] >> (c & 7) & 1;
+        }
+        if (!used) {
+            if (!run++) start = c;
+            if (run == enough || (first && run == want)) { *lcn = start; *len = want; return OFS_NTFS_OK; }
+        }
+        if ((used || c + 1 == v->clusters) && run) {  /* a run ends */
+            if (first) { *lcn = start; *len = run; return OFS_NTFS_OK; }   /* right after the file */
+            if (run > *len) { *lcn = start; *len = run; }
+            run = 0;
+        }
+        first = first && !used;
+        if (++c == v->clusters) c = 0;
+    }
+    if (*len > want) *len = want;
+    return *len ? OFS_NTFS_OK : OFS_NTFS_EFULL;
+}
+
+/* the runs of the non-resident attribute a into rs (*n of them) */
+static int runs_get(const ofs_u8 *a, struct ofs_ntfs_run *rs, unsigned *n)
+{
+    const ofs_u8 *rl = a + rd16(a + 0x20), *end = a + rd32(a + 4);
+    ofs_u32 cur = rd32(a + 0x10), lcn = 0, len;
+    ofs_s32 delta;
+    unsigned ln, on, i;
+    *n = 0;
+    if (rd16(a + 0x20) > rd32(a + 4)) return OFS_NTFS_EBAD;
+    while (rl < end && *rl) {
+        ln = *rl & 15; on = *rl >> 4;
+        if (!ln || ln > 8 || on > 8 || rl + 1 + ln + on > end) return OFS_NTFS_EBAD;
+        ++rl;
+        for (len = 0, i = 0; i < ln; ++i) if (i < 4) len |= (ofs_u32)rl[i] << (8 * i);
+        rl += ln;
+        if (*n == MAXRUNS) return OFS_NTFS_ENOSPACE;
+        rs[*n].vcn = cur; rs[*n].len = len; rs[*n].lcn = NONE;
+        if (on) {
+            for (delta = 0, i = 0; i < on && i < 4; ++i) delta |= (ofs_s32)((ofs_u32)rl[i] << (8 * i));
+            if (on < 4 && (rl[on - 1] & 0x80)) delta |= (ofs_s32)(NONE << (8 * on));
+            rl += on;
+            lcn += (ofs_u32)delta;
+            rs[*n].lcn = lcn;
+        }
+        cur += len;
+        ++*n;
+    }
+    return OFS_NTFS_OK;
+}
+
+/* bytes of a signed number, as the mapping pairs store it */
+static unsigned sbytes(ofs_s64 x)
+{
+    unsigned n = 1;
+    while (n < 8 && (x < -((ofs_s64)1 << (8 * n - 1)) || x >= (ofs_s64)1 << (8 * n - 1))) ++n;
+    return n;
+}
+
+/* the mapping pairs of rs into out (out 0: only counted); their bytes
+   with the closing 0 */
+static unsigned runs_put(const struct ofs_ntfs_run *rs, unsigned n, ofs_u8 *out)
+{
+    unsigned i, p = 0, ln, on, k;
+    ofs_s64 prev = 0, d = 0;
+    for (i = 0; i < n; ++i) {
+        ln = sbytes((ofs_s64)rs[i].len);
+        on = 0;
+        if (rs[i].lcn != NONE) { d = (ofs_s64)rs[i].lcn - prev; on = sbytes(d); prev = rs[i].lcn; }
+        if (out) {
+            out[p] = (ofs_u8)(on << 4 | ln);
+            for (k = 0; k < ln; ++k) out[p + 1 + k] = (ofs_u8)((ofs_u64)rs[i].len >> (8 * k));
+            for (k = 0; k < on; ++k) out[p + 1 + ln + k] = (ofs_u8)((ofs_u64)d >> (8 * k));
+        }
+        p += 1 + ln + on;
+    }
+    if (out) out[p] = 0;
+    return p + 1;
+}
+
+/* attribute a of record b becomes nlen bytes long (a multiple of 8): what
+   follows it moves; OFS_NTFS_ENOSPACE when the record has no room */
+static int attr_resize(struct ofs_ntfs *v, ofs_u8 *b, ofs_u8 *a, ofs_u32 nlen)
+{
+    ofs_u32 olen = rd32(a + 4), used = rd32(b + 0x18), alloc = rd32(b + 0x1C), at = (ofs_u32)(a - b);
+    if (alloc > v->rec_size || used > alloc || at + olen > used) return OFS_NTFS_EBAD;
+    if (used - olen + nlen > alloc) return OFS_NTFS_ENOSPACE;
+    memmove(a + nlen, a + olen, used - at - olen);
+    if (nlen > olen) memset(a + olen, 0, nlen - olen);
+    wr32(a + 4, nlen);
+    wr32(b + 0x18, used - olen + nlen);
+    return OFS_NTFS_OK;
+}
+
+/* the runs of the non-resident attribute a (lowest VCN 0) and its sizes */
+static int put_runs(struct ofs_ntfs *v, ofs_u8 *b, ofs_u8 *a, const struct ofs_ntfs_run *rs, unsigned n,
+                    ofs_u64 size, ofs_u64 init)
+{
+    ofs_u32 mpoff = rd16(a + 0x20), bytes = runs_put(rs, n, 0), total = 0, real = 0;
+    unsigned i;
+    int rc;
+    for (i = 0; i < n; ++i) { total += rs[i].len; if (rs[i].lcn != NONE) real += rs[i].len; }
+    if ((rc = attr_resize(v, b, a, (mpoff + bytes + 7) & ~7UL))) return rc;
+    runs_put(rs, n, a + mpoff);
+    wr64(a + 0x10, 0);
+    wr64(a + 0x18, total ? (ofs_u64)total - 1 : ~(ofs_u64)0);
+    wr64(a + 0x28, (ofs_u64)total * clu_bytes(v));
+    wr64(a + 0x30, size);
+    wr64(a + 0x38, init);
+    if (mpoff >= 0x48 && rd16(a + 0x0C) & 0x8000)  /* sparse: the clusters it has */
+        wr64(a + 0x40, (ofs_u64)real * clu_bytes(v));
+    return OFS_NTFS_OK;
+}
+
+/* $LogFile emptied (once a mount), before the first change of metadata */
+static int log_reset(struct ofs_ntfs *v)
+{
+    static ofs_u8 fill[512];
+    struct ofs_ntfs_ent e;
+    struct ofs_ntfs_run r;
+    const ofs_u8 *a;
+    ofs_u32 blk, nblk, vcn;
+    ofs_lba lba;
+    int rc;
+    if (v->log_reset) return OFS_NTFS_OK;
+    memset(fill, 0xFF, sizeof(fill));
+    if ((rc = stat_rec(v, 2, &e))) return rc == OFS_NTFS_END ? OFS_NTFS_EBAD : rc;
+    if (e.file.nofat) return OFS_NTFS_EBAD;
+    nblk = (ofs_u32)((e.file.size + 511) >> 9);
+    for (blk = 0; blk < nblk; ++blk) {
+        vcn = blk >> v->cshift;
+        if ((rc = data_attr(v, 2, vcn, &a))) return rc;
+        if (!a[8] || (rc = attr_run(a, vcn, &r))) return rc ? rc : OFS_NTFS_EBAD;
+        if (r.lcn == NONE) continue;
+        lba = ((ofs_lba)(r.lcn + (vcn - r.vcn)) << v->cshift) + (blk & ((1UL << v->cshift) - 1));
+        if ((rc = blk_patch(v, lba, 0, fill, 512))) return rc;
+    }
+    v->log_reset = 1;
+    return OFS_NTFS_OK;
+}
+
+/* The entries of record no in the index of directory dir (root and
+   blocks): their duplicated information -- the times and attributes of
+   si (a $STANDARD_INFORMATION value), the sizes -- as Windows keeps it
+   there for DIR.  Every entry: the Win32 and the DOS name. */
+static int dup_info(struct ofs_ntfs *v, ofs_u32 dir, ofs_u32 no, const ofs_u8 *si, ofs_u64 alloc, ofs_u64 size)
+{
+    const ofs_u8 *a, *val;
+    ofs_u8 *base, *p, *key;
+    ofs_u32 len, first, used, off, elen, k;
+    int rc, changed, blk;
+    for (blk = -1;; ++blk) {
+        if (blk < 0) {
+            if ((rc = ext_attr(v, dir, AT_IROOT, 1, 0, v->rec, &v->rec_no, &a)))
+                return rc == OFS_NTFS_END ? OFS_NTFS_EBAD : rc;
+            if (!(val = res_value(a, &len)) || len < 32) return OFS_NTFS_EBAD;
+            base = (ofs_u8 *)val + 16;
+            if (rd32(base + 4) > len - 16) return OFS_NTFS_EBAD;
+        } else {
+            rc = load_idx(v, dir, (ofs_u32)blk);
+            if (rc == OFS_NTFS_END) return OFS_NTFS_OK;
+            if (rc == UNUSED) continue;
+            if (rc) return rc;
+            base = v->idx + 24;
+            if (rd32(base + 4) > (ofs_u32)v->idx_size - 24) return OFS_NTFS_EBAD;
+        }
+        first = rd32(base); used = rd32(base + 4);
+        changed = 0;
+        for (off = first; off + 16 <= used; off += elen) {
+            p = base + off;
+            elen = rd16(p + 8);
+            if (elen < 16 || off + elen > used) return OFS_NTFS_EBAD;
+            if (rd16(p + 12) & 2) break;        /* the last entry */
+            if (rd32(p) != no || rd16(p + 4) || rd16(p + 10) < 0x42 || 16u + rd16(p + 10) > elen) continue;
+            key = p + 16;
+            for (k = 0; k < 32; ++k) key[8 + k] = si[k];   /* created, written, changed, read */
+            wr64(key + 0x28, alloc);
+            wr64(key + 0x30, size);
+            wr32(key + 0x38, (rd32(key + 0x38) & F_DIR) | (rd32(si + 0x20) & ~F_DIR));
+            changed = 1;
+        }
+        if (changed && (rc = blk < 0 ? write_rec(v, v->rec_no, v->rec) : write_idx(v))) return rc;
+    }
+}
+
+/* $STANDARD_INFORMATION (the time written, the archive bit) and, with
+   sizes, the sizes of the $FILE_NAMEs of the base record no (in rec2), the
+   record written; then the entries in the directories (dup_info) */
+static int finish(struct ofs_ntfs *v, struct ofs_ntfs_file *f, ofs_u16 time, ofs_u16 date, int sizes)
+{
+    ofs_u8 *val, *b, si[0x24];
+    const ofs_u8 *a, *d;
+    ofs_u32 len, alen, parent[4];
+    ofs_u64 t, alloc = 0;
+    unsigned np = 0, i;
+    int rc;
+    if ((rc = load_rec(v, f->first, v->rec2, &v->rec2_no))) return rc == OFS_NTFS_END ? OFS_NTFS_EBAD : rc;
+    b = v->rec2;
+    if (!(a = find_attr(v, b, AT_STD, 0)) || !(val = (ofs_u8 *)res_value(a, &len)) || len < 36)
         return OFS_NTFS_EBAD;
     if (date) {
         t = nt_time(time, date, v->tz);
-        wr32(val + 0x08, (ofs_u32)t); wr32(val + 0x0C, (ofs_u32)(t >> 32));   /* written */
-        wr32(val + 0x10, (ofs_u32)t); wr32(val + 0x14, (ofs_u32)(t >> 32));   /* record changed */
+        wr64(val + 0x08, t);                    /* written */
+        wr64(val + 0x10, t);                    /* record changed */
     }
     wr32(val + 0x20, rd32(val + 0x20) | OFS_NTFS_ARCH);
-    return write_rec(v, no, v->rec2);
+    memcpy(si, val, 0x24);
+    if ((d = find_attr(v, b, AT_DATA, 0)))
+        alloc = d[8] ? rd64(d + 0x28) : (rd32(d + 0x10) + 7) & ~7UL;
+    for (a = b + rd16(b + 0x14); a + 0x18 <= b + v->rec_size && rd32(a) != AT_END; a += alen) {
+        alen = rd32(a + 4);
+        if (alen < 0x18 || alen > (ofs_u32)(b + v->rec_size - a)) return OFS_NTFS_EBAD;
+        if (rd32(a) == AT_FNAME && (val = (ofs_u8 *)res_value(a, &len)) && len >= 0x42) {
+            if (sizes) {
+                wr64(val + 0x28, alloc);
+                wr64(val + 0x30, (ofs_u64)f->size);
+            }
+            if (!rd16(val + 4) && np < 4 && (!np || parent[np - 1] != rd32(val))) parent[np++] = rd32(val);
+        }
+    }
+    if ((rc = write_rec(v, f->first, b))) return rc;
+    for (i = 0; i < np; ++i)
+        if ((rc = dup_info(v, parent[i], f->first, si, alloc, (ofs_u64)f->size))) return rc;
+    return OFS_NTFS_OK;
+}
+
+/* the unnamed $DATA of the base record of f, as one attribute there, in
+   rec2: *pa */
+static int base_data(struct ofs_ntfs *v, struct ofs_ntfs_file *f, ofs_u8 **pa)
+{
+    const ofs_u8 *a;
+    int rc;
+    if ((rc = data_attr(v, f->first, 0, &a))) return rc;
+    if (v->rec2_no != f->first) return OFS_NTFS_ENOSPACE;   /* in an extension record */
+    if (a[8] && (rd32(a + 0x10) || rd32(a + 0x14) ||
+                 rd64(a + 0x18) + 1 != (rd64(a + 0x28) >> (9 + v->cshift))))
+        return OFS_NTFS_ENOSPACE;                          /* more extents */
+    *pa = (ofs_u8 *)a;
+    return OFS_NTFS_OK;
+}
+
+/* clusters for runs rs[*n..] until they cover need clusters, from hint on */
+static int grow_runs(struct ofs_ntfs *v, struct ofs_ntfs_run *rs, unsigned *n, ofs_u32 have, ofs_u32 need)
+{
+    ofs_u32 lcn, len, hint = v->bm_hint;
+    unsigned i;
+    int rc;
+    for (i = *n; i--;)                          /* after the last cluster it has */
+        if (rs[i].lcn != NONE) { hint = rs[i].lcn + rs[i].len; break; }
+    while (have < need) {
+        if ((rc = bm_find(v, hint, need - have, &lcn, &len))) return rc;
+        if ((rc = bm_set(v, lcn, len, 1))) return rc;
+        if (*n && rs[*n - 1].lcn != NONE && rs[*n - 1].lcn + rs[*n - 1].len == lcn) {
+            rs[*n - 1].len += len;
+        } else {
+            if (*n == MAXRUNS) { bm_set(v, lcn, len, 0); return OFS_NTFS_ENOSPACE; }
+            rs[*n].vcn = have; rs[*n].len = len; rs[*n].lcn = lcn;
+            ++*n;
+        }
+        have += len;
+        hint = v->bm_hint = lcn + len;
+    }
+    return OFS_NTFS_OK;
+}
+
+/* the clusters of rs from cluster keep on freed, rs cut there */
+static int cut_runs(struct ofs_ntfs *v, struct ofs_ntfs_run *rs, unsigned *n, ofs_u32 keep)
+{
+    unsigned i;
+    ofs_u32 off;
+    int rc;
+    for (i = 0; i < *n; ++i) {
+        if (rs[i].vcn + rs[i].len <= keep) continue;
+        off = keep > rs[i].vcn ? keep - rs[i].vcn : 0;
+        if (rs[i].lcn != NONE && (rc = bm_set(v, rs[i].lcn + off, rs[i].len - off, 0))) return rc;
+        rs[i].len = off;
+    }
+    while (*n && !rs[*n - 1].len) --*n;
+    return OFS_NTFS_OK;
+}
+
+int ofs_ntfs_resize(struct ofs_ntfs *v, struct ofs_ntfs_file *f, ofs_fsize size, ofs_u16 time, ofs_u16 date)
+{
+    struct ofs_ntfs_run *rs = (struct ofs_ntfs_run *)v->idx;
+    ofs_u32 cb = clu_bytes(v), have, need, vlen, voff, i;
+    ofs_u64 init;
+    unsigned n = 0;
+    ofs_u8 *a, *val, blk[512];
+    int rc;
+    if (!v->write) return OFS_NTFS_EROFS;
+    if (f->root || f->first < 16) return OFS_NTFS_EROFS;
+    if (f->nofat == 2 || f->nofat == 3) return OFS_NTFS_ECOMP;
+    if (!v->bm_nruns) return OFS_NTFS_ENOSPACE;
+    if (size == f->size) return OFS_NTFS_OK;
+    if ((rc = log_reset(v))) return rc;
+    if ((rc = base_data(v, f, &a))) return rc;
+    v->idx_no = NONE;                           /* idx holds the runs */
+    need = (ofs_u32)(((ofs_u64)size + cb - 1) / cb);
+    if (!a[8]) {                                /* resident */
+        voff = rd16(a + 0x14); vlen = rd32(a + 0x10);
+        if (voff + vlen > rd32(a + 4)) return OFS_NTFS_EBAD;
+        if ((ofs_u64)size <= v->rec_size &&
+            attr_resize(v, v->rec2, a, (voff + (ofs_u32)size + 7) & ~7UL) == OFS_NTFS_OK) {
+            if ((ofs_u32)size > vlen) memset(a + voff + vlen, 0, (ofs_u32)size - vlen);
+            wr32(a + 0x10, (ofs_u32)size);
+            f->valid = f->size = size;
+            return finish(v, f, time, date, 1);
+        }
+        /* out of the record: its value into clusters of its own */
+        if ((rc = grow_runs(v, rs, &n, 0, need))) { cut_runs(v, rs, &n, 0); return rc; }
+        val = a + voff;
+        for (i = 0; i < vlen; i += 512) {
+            ofs_u32 k = vlen - i < 512 ? vlen - i : 512, c = i / cb, j;
+            ofs_lba lba;
+            for (j = 0; j < n && !(c >= rs[j].vcn && c - rs[j].vcn < rs[j].len); ++j) ;
+            memcpy(blk, val + i, k);
+            memset(blk + k, 0, 512 - k);
+            lba = ((ofs_lba)(rs[j].lcn + (c - rs[j].vcn)) << v->cshift) + ((i >> 9) & ((1UL << v->cshift) - 1));
+            if ((rc = blk_patch(v, lba, 0, blk, 512))) { cut_runs(v, rs, &n, 0); return rc; }
+        }
+        /* the attribute becomes non-resident: header 0x40, then the runs */
+        if ((rc = attr_resize(v, v->rec2, a, 0x48))) { cut_runs(v, rs, &n, 0); return rc; }
+        memset(a + 0x10, 0, 0x38);
+        a[8] = 1; a[9] = 0;
+        wr16(a + 0x0A, 0x40);
+        wr16(a + 0x20, 0x40);
+        if ((rc = put_runs(v, v->rec2, a, rs, n, size, vlen))) {
+            v->rec2_no = NONE;                  /* the record in memory is spoilt: read again */
+            cut_runs(v, rs, &n, 0);
+            return rc;
+        }
+        f->nofat = 0; f->rlen = 0;
+        f->size = size; f->valid = vlen;
+        return finish(v, f, time, date, 1);
+    }
+    if ((rc = runs_get(a, rs, &n))) return rc;
+    for (have = 0, i = 0; i < n; ++i) have += rs[i].len;
+    init = rd64(a + 0x38);
+    if (need > have) {
+        if ((rc = grow_runs(v, rs, &n, have, need)) ||
+            (rc = put_runs(v, v->rec2, a, rs, n, size, init))) {
+            cut_runs(v, rs, &n, have);          /* the new clusters free again */
+            v->rec2_no = NONE;
+            return rc;
+        }
+    } else {
+        if ((ofs_u64)size < init) init = size;
+        if (need < have && (rc = cut_runs(v, rs, &n, need))) return rc;
+        if ((rc = put_runs(v, v->rec2, a, rs, n, size, init))) { v->rec2_no = NONE; return rc; }
+    }
+    f->size = size;
+    if (f->valid > size) f->valid = size;
+    f->rlen = 0;
+    return finish(v, f, time, date, 1);
 }
 
 int ofs_ntfs_write(struct ofs_ntfs *v, struct ofs_ntfs_file *f, ofs_fsize off, const void OFS_FAR *buf,
                    ofs_u16 len, ofs_u16 *done, ofs_u16 time, ofs_u16 date)
 {
+    static const ofs_u8 zeros[512];
     const ofs_u8 OFS_FAR *in8 = (const ofs_u8 OFS_FAR *)buf;
     const ofs_u8 *a;
-    ofs_u8 *val;
+    ofs_u8 *val, *ba;
     ofs_u32 vlen, sec, vcn;
     struct ofs_ntfs_run r;
     unsigned in, n;
+    ofs_fsize pos, end;
     ofs_lba lba;
-    int rc;
+    int rc, zero;
     *done = 0;
     if (!v->write) return OFS_NTFS_EROFS;
     if (f->root || f->first < 16) return OFS_NTFS_EROFS;
     if (f->nofat == 2 || f->nofat == 3) return OFS_NTFS_ECOMP;
     if (!len) return OFS_NTFS_OK;
-    /* not past the initialized data: that would change the sizes */
-    if (off >= f->valid || len > f->valid - off) return OFS_NTFS_ENOSPACE;
+    if (off > f->size || len > f->size - off) {     /* past the end: the file grows first */
+        if ((rc = ofs_ntfs_resize(v, f, off + len, time, date))) return rc;
+    }
     if (f->nofat == 1) {                            /* resident: in the record */
         if ((rc = data_attr(v, f->first, 0, &a))) return rc;
         if (!(val = (ofs_u8 *)res_value(a, &vlen)) || off + len > vlen) return OFS_NTFS_EBAD;
         fmemcpy(val + (unsigned)off, in8, len);
         if ((rc = write_rec(v, v->rec2_no, v->rec2))) return rc;
         *done = len;
-        return touch(v, f->first, time, date);
+        return finish(v, f, time, date, 0);
     }
-    while (len) {
-        in = (unsigned)off & 511;
+    /* from the initialized size on: zeros up to off first */
+    pos = off < f->valid ? off : f->valid;
+    end = off + len;
+    if (end > f->valid && (rc = log_reset(v))) return rc;
+    while (pos < end) {
+        zero = pos < off;
+        in = (unsigned)pos & 511;
         n = 512 - in;
-        if (n > len) n = len;
-        sec = (ofs_u32)(off >> 9);
+        if (zero ? n > off - pos : n > end - pos) n = (unsigned)(zero ? off - pos : end - pos);
+        sec = (ofs_u32)(pos >> 9);
         vcn = sec >> v->cshift;
         if (!f->rlen || vcn < f->idx || vcn - f->idx >= f->rlen) {
             if ((rc = data_attr(v, f->first, vcn, &a))) return rc;
@@ -1225,11 +1675,20 @@ int ofs_ntfs_write(struct ofs_ntfs *v, struct ofs_ntfs_file *f, ofs_fsize off, c
             if ((rc = attr_run(a, vcn, &r))) return rc == OFS_NTFS_END ? OFS_NTFS_EBAD : rc;
             f->idx = r.vcn; f->clu = r.lcn; f->rlen = r.len;
         }
-        if (f->clu == NONE) return *done ? touch(v, f->first, time, date) : OFS_NTFS_ENOSPACE;   /* a hole */
+        if (f->clu == NONE) {                       /* a hole: not yet */
+            if (zero || !*done) return OFS_NTFS_ENOSPACE;
+            break;
+        }
         lba = ((ofs_lba)(f->clu + (vcn - f->idx)) << v->cshift) + (sec & ((1UL << v->cshift) - 1));
-        if ((rc = blk_patch(v, lba, in, in8, n))) return rc;
-        in8 += n; off += n; len -= (ofs_u16)n; *done += (ofs_u16)n;
+        if ((rc = blk_patch(v, lba, in, zero ? zeros : in8, n))) return rc;
+        pos += n;
+        if (!zero) { in8 += n; *done += (ofs_u16)n; }
     }
-    return touch(v, f->first, time, date);
+    if (pos > f->valid) {                           /* the initialized size follows */
+        if ((rc = base_data(v, f, &ba))) return rc;
+        wr64(ba + 0x38, (ofs_u64)pos);
+        f->valid = pos;
+    }
+    return finish(v, f, time, date, 0);
 }
 #endif
