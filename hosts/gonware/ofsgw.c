@@ -227,6 +227,22 @@ static int create(struct fs_node *dir, const char *name, int is_dir, struct fs_n
 }
 
 static int sync(struct volume *v) { return ofs_sync(VOL(v)); }
+#endif
+
+static int statfs(struct volume *v, uint64_t *free, uint64_t *total, uint32_t *unit)
+{
+	ofs_u32 fr, cb, cl;
+	int r = ofs_statfs(VOL(v), &fr, &cb, &cl);
+
+	if (r)
+		return r;
+	*free = fr;
+	*total = cl;
+	*unit = cb;
+	return FS_OK;
+}
+
+#ifndef OFS_READONLY
 
 static int resize(struct fs_node *n, uint64_t size)
 {
@@ -264,6 +280,7 @@ const struct fs_driver ofs_gw_driver = {
 #else
 	NULL, NULL, NULL, NULL, NULL, NULL,
 #endif
+	statfs,
 };
 
 /* from the module's init: its heap owner holds the volumes' buffers */
