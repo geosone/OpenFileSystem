@@ -14,14 +14,14 @@
 #include "ofs/exfat_check.h"
 
 #define MAXS     OFS_EXCHK_MAXSECT
-#define NOBUF    0xFFFFFFFFUL
+#define NOBUF    ((ofs_lba)-1)       /* no sector: an empty cache, past a chain */
 #define EOC      0xFFFFFFFFUL
 #define BADCLU   0xFFFFFFF7UL
 #define MAXDEPTH 64
 #define MAXPAIRS 4096
 #define MAXRANGE 10                     /* listed ranges and cross links */
 
-struct cache { ofs_u32 lba; ofs_u8 b[MAXS]; };
+struct cache { ofs_lba lba; ofs_u8 b[MAXS]; };
 /* a file or directory: its chain and the cluster last walked to */
 struct chain { ofs_u32 first, size, idx, clu; int nofat, root; };
 
@@ -64,7 +64,7 @@ static const char *where(void) { return plen ? path : "\\"; }
 /* repairs of the structure: with a write function, in the first pass */
 static int fixing(void) { return first_pass && C->write; }
 
-static const ofs_u8 *sec(struct cache *c, ofs_u32 lba)
+static const ofs_u8 *sec(struct cache *c, ofs_lba lba)
 {
     if (c->lba != lba) {
         c->lba = NOBUF;
@@ -117,8 +117,9 @@ static int fat_set(ofs_u32 clu, ofs_u32 v)
 
 static int valid(ofs_u32 clu) { return clu >= 2 && clu < nclu + 2; }
 
-/* the sector holding byte off of a file, NOBUF past its chain */
-static ofs_u32 file_lba(struct chain *f, ofs_u32 off)
+/* the sector holding byte off of a file, NOBUF past its chain (64 bits:
+   the heap of a volume may reach past 2^32 sectors) */
+static ofs_lba file_lba(struct chain *f, ofs_u32 off)
 {
     ofs_u32 idx = off >> (sshift + cshift), next;
     if (!f->root && off >= f->size) return NOBUF;
@@ -132,14 +133,14 @@ static ofs_u32 file_lba(struct chain *f, ofs_u32 off)
         }
     }
     if (!valid(f->clu)) return NOBUF;
-    return heap + ((f->clu - 2) << cshift) + ((off >> sshift) & ((1UL << cshift) - 1));
+    return heap + ((ofs_lba)(f->clu - 2) << cshift) + ((off >> sshift) & ((1UL << cshift) - 1));
 }
 
 /* the 32-byte entry at pos of a directory, 0 at its end; changes to it
    are written with put(&cdir) */
 static ofs_u8 *entry(struct chain *d, ofs_u32 pos)
 {
-    ofs_u32 lba = file_lba(d, pos);
+    ofs_lba lba = file_lba(d, pos);
     if (lba == NOBUF || !sec(&cdir, lba)) return 0;
     return cdir.b + ((unsigned)pos & (ssize - 1));
 }
@@ -280,7 +281,8 @@ static char oem(ofs_u16 c)
 
 static void load_upcase(ofs_u32 want)
 {
-    ofs_u32 off, sum = 0, lba, idx = 0;
+    ofs_u32 off, sum = 0, idx = 0;
+    ofs_lba lba;
     const ofs_u8 *s;
     ofs_u16 v, prev = 0;
     int run = 0, half = 0;
@@ -526,7 +528,8 @@ static void range(int lost, ofs_u32 a, ofs_u32 b)
 
 static void compare(void)
 {
-    ofs_u32 i, lba, next, start = 0, cur = NOBUF, cur2 = NOBUF;
+    ofs_u32 i, next, start = 0;
+    ofs_lba lba, cur = NOBUF, cur2 = NOBUF;
     ofs_u8 *s = 0, *p, m;
     int bit, inuse, kind = 0, k, dirty = 0, dirty2 = 0;     /* kind of the open range: 1 lost, 2 unmarked */
     if (!bitmap.first) return;
@@ -615,7 +618,7 @@ static int copy_region(ofs_u32 from, ofs_u32 to)
 
 static int check_boot(void)
 {
-    ofs_u32 len;
+    ofs_lba len, end;
     unsigned s, i;
     int main_ok, backup_ok, ext = 0, dummy = 0, differs = 0, fix = C->write != 0;
     if (C->read(C->dev, C->start, boot)) return OFS_EXFAT_EIO;
@@ -632,15 +635,18 @@ static int check_boot(void)
         return OFS_EXFAT_EBAD;
     }
     ssize = 1u << sshift;
-    len = rd32(boot+72);
-    if (rd32(boot+76)) len = 0xFFFFFFFFUL;
+#ifdef OFS_NARROW
+    len = rd32(boot+76) ? 0xFFFFFFFFUL : rd32(boot+72);
+#else
+    len = rd32(boot+72) | (ofs_lba)rd32(boot+76) << 32;     /* VolumeLength */
+#endif
     fat = rd32(boot+80); heap = rd32(boot+88); nclu = rd32(boot+92); root = rd32(boot+96);
     C->serial = rd32(boot+100); C->flags = rd16(boot+106);
     C->clusters = nclu; C->cluster_size = 1UL << (sshift + cshift);
     if (boot[105] != 1) report(OFS_EXCHK_WARN, "File system revision %u.%02u", boot[105], boot[104]);
     if (boot[110] != 1 && boot[110] != 2) { report(OFS_EXCHK_ERROR, "Invalid number of FATs"); return OFS_EXFAT_EBAD; }
     if (fat < 24 || rd32(boot+84) < ((nclu + 2) >> (sshift - 2)) || heap < fat + rd32(boot+84) * boot[110] ||
-        !nclu || nclu > 0xFFFFFFF5UL || heap + (nclu << cshift) > len || heap + (nclu << cshift) < heap) {
+        !nclu || nclu > 0xFFFFFFF5UL || (end = heap + ((ofs_lba)nclu << cshift)) > len || end < heap) {
         report(OFS_EXCHK_ERROR, "Invalid FAT or cluster heap layout");
         return OFS_EXFAT_EBAD;
     }

@@ -21,7 +21,8 @@ struct ofs_exchk {
     ofs_exfat_write_fn write;            /* 0: report only */
     void *dev;
     ofs_u32 start;                       /* first sector of the volume (the check
-                                             reaches 2^32 sectors from it) */
+                                             reaches past 2^32 sectors from it in
+                                             32/64-bit builds, 2^32 under DOS) */
     const struct ofs_cp *cp;       /* for the names in messages */
     void (*msg)(void *ctx, int level, const char *text);
     int (*mark)(void *ctx, ofs_u32 bit); /* sets a bit, returns the old one */

@@ -92,6 +92,23 @@ static void make(const char *name, ofs_u64 size, unsigned n)
     }
 }
 
+/* a new directory (one cluster, from the hint on) with an empty file in it */
+static void make_dir(const char *name, const char *inner)
+{
+    struct ofs_exfat_file root, d;
+    struct ofs_exfat_where rw, dw;
+    ofs_u16 nm[64];
+    ofs_u32 pos;
+    ofs_exfat_rootdir(&vol, &root);
+    memset(&rw, 0, sizeof(rw));
+    rw.none = 1;
+    CHECK(ofs_exfat_create(&vol, &root, &rw, nm, name16(name, nm), OFS_EXFAT_DIR, 0x5000, 0x5A21, &pos));
+    find(name);
+    d = ent.file;
+    ofs_exfat_where_of(&root, ent.pos, &dw);
+    CHECK(ofs_exfat_create(&vol, &d, &dw, nm, name16(inner, nm), OFS_EXFAT_ARCH, 0x5000, 0x5A21, &pos));
+}
+
 /* the file read back: whole (step 1) or every step-th 64 KiB */
 static void check(const char *name, ofs_u64 size, unsigned n, unsigned step)
 {
@@ -146,6 +163,8 @@ int main(int argc, char **argv)
     make("HIGH.BIN", 3000000, 1);
     assert(((ofs_u64)top << vol.sshift) > ((ofs_u64)2 << 40));   /* past 2 TiB */
     assert(vol.sshift != 9 || top >= GIB4);
+    /* a directory up there too: the check has to read it past 2^32 sectors */
+    make_dir("HIGHDIR", "INNER.TXT");
     /* larger than 4 GiB: 64-bit size and valid data length */
     vol.hint = 2;
     make("BIG.BIN", big, 2);
