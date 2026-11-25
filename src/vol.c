@@ -346,6 +346,8 @@ static int nt_err(int r)
     case OFS_NTFS_EROFS: return OFS_EROFS;
     case OFS_NTFS_ENOSPACE: return OFS_ENOTSUP;   /* not yet (a hole, a runlist too large ...) */
     case OFS_NTFS_EFULL: return OFS_EFULL;
+    case OFS_NTFS_EEXIST: return OFS_EEXIST;
+    case OFS_NTFS_ENAME: return OFS_ENAME;
 #endif
     default: return r;                          /* EIO, EBAD and ESIZE are the same */
     }
@@ -408,12 +410,20 @@ static int nt_resize(struct ofs_vol *v, struct ofs_node *n, ofs_fsize size)
     n->size = n->u.ntfs.size;
     return nt_err(r);
 }
+
+static int nt_create(struct ofs_vol *v, struct ofs_node *dir, const ofs_u16 *name, unsigned len, int is_dir,
+                     ofs_u32 *pos)
+{
+    ofs_u16 t = 0, d = 0;
+    if (v->host.now) v->host.now(v->dev, &t, &d);
+    return nt_err(ofs_ntfs_create(&v->u.ntfs, &dir->u.ntfs, name, len, is_dir, t, d, pos));
+}
 #endif
 
 static const struct ofs_fs fs_ntfs = {
     ofs_ntfs_probe, nt_mount, nt_root, nt_next, nt_lookup, nt_read, nt_statfs
 #ifndef OFS_READONLY
-    , nt_write, nt_resize, NULL, NULL, NULL, NULL, NULL,
+    , nt_write, nt_resize, nt_create, NULL, NULL, NULL, NULL,
 #ifdef OFS_NARROW
     0xFFFFFFFFUL
 #else
@@ -723,6 +733,9 @@ static int entry_pos(struct ofs_vol *v, const struct ofs_node *n, ofs_u32 *pos)
 #endif
 #ifndef OFS_NO_EXFAT
     if (v->fs == &fs_exfat) { *pos = n->u.ex.w.pos; return 0; }
+#endif
+#ifndef OFS_NO_NTFS
+    if (v->fs == &fs_ntfs) return OFS_ENOTSUP;  /* removing and renaming: not yet */
 #endif
     return OFS_EROFS;
 }

@@ -13,6 +13,14 @@ non-resident attribute's runs are collected.  Errors (exit 1):
     initialized <= data)
   - a directory index entry whose size (the duplicated information Windows
     shows in DIR) is not the size of the file's $DATA
+  - a directory index out of order (by $UpCase, then exactly), a child
+    block not in use by the index $BITMAP or reached twice, a block in use
+    that no entry reaches, an index block's VCN wrong
+  - an index entry naming a record not in use, of another sequence number,
+    or without that $FILE_NAME; a file's $FILE_NAME no entry of its
+    directory names
+  - a record in use whose bit in $MFT's $BITMAP is off, a record from 24 on
+    with its bit on that is not in use; $MFTMirr not the first records
 """
 import struct
 import sys
@@ -39,10 +47,15 @@ class Vol:
         c = rd("<b", boot, 0x44)
         self.isize = 1 << -c if c < 0 else c * self.cb
         self.mft_lcn = rd("<Q", boot, 0x30)
+        self.mirr_lcn = rd("<Q", boot, 0x38)
         rec0 = self.fixup(self.read(self.mft_lcn * self.cb, self.rs))
         a = self.attr(rec0, 0x80)
         self.mft_runs = self.runs(a)
         self.mft_size = rd("<Q", a, 0x30)
+        u = self.fixup(self.record(10))
+        a = self.attr(u, 0x80)
+        raw = self.data(a, rd("<Q", a, 0x30))
+        self.upcase = [rd("<H", raw, 2 * i) for i in range(len(raw) // 2)]
 
     def read(self, off, n):
         self.f.seek(off)
@@ -116,6 +129,9 @@ class Vol:
                 return self.read(lcn * self.cb + off - vcn * self.cb, self.rs)
         raise ValueError("record %d not in $MFT" % no)
 
+    def raw_record(self, no):
+        return self.record(no)
+
     def data(self, a, size):
         out = bytearray()
         for vcn, length, lcn in self.runs(a):
@@ -123,9 +139,100 @@ class Vol:
         return out[:size]
 
 
+def i30(a):
+    return a[9] == 4 and bytes(a[rd("<H", a, 0x0A):rd("<H", a, 0x0A) + 8]) == "$I30".encode("utf-16-le")
+
+
+def collate(up, name):
+    return ([up[c] if c < len(up) else c for c in name], name)
+
+
+def fn_key(val):
+    n = val[0x40]
+    return [rd("<H", val, 0x42 + 2 * i) for i in range(n)], val[0x41]
+
+
+def check_dirs(v, dirs, records, errors):
+    """dirs: record -> (root value, allocation data or None, bitmap bytes or None);
+    records: record -> (seq, in use, [(parent, name, ns)])"""
+    up = v.upcase
+    vbits = v.cb.bit_length() - 1 if v.cb <= v.isize else 9
+    named = set()
+    for d, (root, alloc, bitmap) in dirs.items():
+        seen = set()
+        last = [None]
+
+        def node(b, at, where, depth):
+            first, used, flags = rd("<I", b, at), rd("<I", b, at + 4), b[at + 12]
+            p = at + first
+            while p + 16 <= at + used:
+                ref, elen, klen, ef = rd("<Q", b, p), rd("<H", b, p + 8), rd("<H", b, p + 10), rd("<H", b, p + 12)
+                if elen < 16:
+                    errors.append("directory %d %s: entry length %d" % (d, where, elen))
+                    return
+                if bool(ef & 1) != bool(flags & 1):
+                    errors.append("directory %d %s: an entry with%s a child in a node with%s" %
+                                  (d, where, "" if ef & 1 else "out", "" if flags & 1 else "out"))
+                if ef & 1:
+                    vcn = rd("<Q", b, p + elen - 8)
+                    k = (vcn << vbits) // v.isize
+                    if depth > 16 or alloc is None or (k + 1) * v.isize > len(alloc):
+                        errors.append("directory %d %s: child VCN %d past the allocation" % (d, where, vcn))
+                    elif k in seen:
+                        errors.append("directory %d: block %d reached twice" % (d, k))
+                    else:
+                        seen.add(k)
+                        if not (bitmap and k // 8 < len(bitmap) and bitmap[k // 8] >> (k & 7) & 1):
+                            errors.append("directory %d: block %d not in use by the bitmap" % (d, k))
+                        ib = bytearray(alloc[k * v.isize:(k + 1) * v.isize])
+                        if ib[:4] != b"INDX":
+                            errors.append("directory %d: block %d is not INDX" % (d, k))
+                        else:
+                            v.fixup(ib)
+                            if rd("<Q", ib, 0x10) != vcn:
+                                errors.append("directory %d: block %d has VCN %d, not %d" % (d, k, rd("<Q", ib, 0x10), vcn))
+                            node(ib, 0x18, "block %d" % k, depth + 1)
+                if ef & 2:
+                    return
+                val = b[p + 16:p + 16 + klen]
+                name, ns = fn_key(val)
+                key = collate(up, name)
+                if last[0] is not None and not last[0] < key:
+                    errors.append("directory %d %s: %r not after %r" %
+                                  (d, where, "".join(map(chr, name)), "".join(map(chr, last[0][1]))))
+                last[0] = key
+                no, seq = ref & 0xFFFFFFFFFFFF, ref >> 48
+                r = records.get(no)
+                if no >= 16:
+                    if r is None or not r[1]:
+                        errors.append("directory %d: %r names record %d, not in use" % (d, "".join(map(chr, name)), no))
+                    elif r[0] != seq:
+                        errors.append("directory %d: %r names record %d seq %d, it has %d" %
+                                      (d, "".join(map(chr, name)), no, seq, r[0]))
+                    elif (d, tuple(name), ns) not in r[2]:
+                        errors.append("directory %d: record %d has no $FILE_NAME %r" % (d, no, "".join(map(chr, name))))
+                    named.add((no, d, tuple(name), ns))
+                p += elen
+
+        node(root, 16, "root", 0)
+        if bitmap is not None and alloc is not None:
+            for k in range(len(alloc) // v.isize):
+                if k // 8 < len(bitmap) and bitmap[k // 8] >> (k & 7) & 1 and k not in seen:
+                    errors.append("directory %d: block %d in use, no entry reaches it" % (d, k))
+    for no, (seq, used, fns) in records.items():
+        if no >= 16 and used:
+            for parent, name, ns in fns:
+                if parent in dirs and (no, parent, name, ns) not in named:
+                    errors.append("record %d: no entry of directory %d names %r" % (no, parent, "".join(map(chr, name))))
+
+
 def main():
     v = Vol(sys.argv[1])
     errors = []
+    dirs = {}
+    records = {}
+    mftbitmap = None
+    allfns = {}
     owner = {}
     sizes = {}              # base record: the size of its unnamed $DATA
     entries = []            # (directory, file record, size in the entry)
@@ -133,17 +240,30 @@ def main():
     bitmap = None
     for no in range(v.mft_size // v.rs):
         b = v.record(no)
-        if b[:4] != b"FILE" or not rd("<H", b, 0x16) & 1:
+        if b[:4] != b"FILE":
+            continue
+        if not rd("<H", b, 0x16) & 1:
+            records[no] = (rd("<H", b, 0x10), False, [])
             continue
         b = v.fixup(b)
         base = rd("<Q", b, 0x20) & 0xFFFFFFFFFFFF
+        fns = allfns.setdefault(base or no, [])     # an extension record's go to its base
+        records[no] = (rd("<H", b, 0x10), True, allfns.setdefault(no, []))
+        droot = dalloc = dbitmap = None
         data_size = fn_sizes = None
         for t, a in v.attrs(b):
             if not a[8]:
-                if t == 0x90 and a[9] == 4:             # $INDEX_ROOT $I30
+                if t == 0x90 and i30(a):             # $INDEX_ROOT $I30
                     entries += v.index_entries(no, a[rd("<H", a, 0x14):], 16)
+                    droot = bytearray(a[rd("<H", a, 0x14):rd("<H", a, 0x14) + rd("<I", a, 0x10)])
+                if t == 0xB0 and i30(a):
+                    dbitmap = a[rd("<H", a, 0x14):rd("<H", a, 0x14) + rd("<I", a, 0x10)]
+                if t == 0xB0 and a[9] == 0 and no == 0:
+                    mftbitmap = a[rd("<H", a, 0x14):rd("<H", a, 0x14) + rd("<I", a, 0x10)]
                 if t == 0x30:
                     val = a[rd("<H", a, 0x14):]
+                    name, ns = fn_key(val)
+                    fns.append((rd("<Q", val, 0) & 0xFFFFFFFFFFFF, tuple(name), ns))
                     fn_sizes = fn_sizes or []
                     fn_sizes.append(rd("<Q", val, 0x30))
                 elif t == 0x80 and a[9] == 0:
@@ -160,8 +280,13 @@ def main():
                     errors.append("record %d attr %#x: sizes %d/%d/%d" % (no, t, alloc, size, init))
                 if t == 0x80 and a[9] == 0 and not base:
                     data_size = size
-                if t == 0xA0 and a[9] == 4:             # $INDEX_ALLOCATION $I30
+                if t == 0xB0 and i30(a):
+                    dbitmap = v.data(a, size)
+                if t == 0xB0 and a[9] == 0 and no == 0:
+                    mftbitmap = v.data(a, size)
+                if t == 0xA0 and i30(a):             # $INDEX_ALLOCATION $I30
                     alldata = v.data(a, size)
+                    dalloc = alldata
                     for blk in range(0, size, v.isize):
                         ib = alldata[blk:blk + v.isize]
                         if ib[:4] == b"INDX":
@@ -181,6 +306,18 @@ def main():
                     owner[c] = no
         if not base and data_size is not None:
             sizes[no] = data_size
+        if not base and droot is not None:
+            dirs[no] = (droot, dalloc, dbitmap)
+    check_dirs(v, dirs, records, errors)
+    for no, (seq, used, fns) in records.items():
+        bit = mftbitmap is not None and no // 8 < len(mftbitmap) and mftbitmap[no // 8] >> (no & 7) & 1
+        if used and not bit:
+            errors.append("record %d in use, its bit in $MFT's $BITMAP off" % no)
+        elif bit and not used and no >= 24:
+            errors.append("record %d not in use, its bit in $MFT's $BITMAP on" % no)
+    n = 4 if v.cb <= 4 * v.rs else v.cb // v.rs
+    if v.read(v.mirr_lcn * v.cb, n * v.rs) != b"".join(v.record(i) for i in range(n)):
+        errors.append("$MFTMirr is not the first %d records" % n)
     for d, no, size in entries:
         if no >= 16 and no in sizes and size != sizes[no]:
             errors.append("directory %d: the entry of record %d has size %d, $DATA %d" % (d, no, size, sizes[no]))

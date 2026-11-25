@@ -8,8 +8,12 @@
 # moves out of its record, truncating and growing again (zeros), writing
 # far past the end, appending to a fragmented file, emptying a file and
 # filling it again, the volume filled up (ENOSPC) and the file cut back.
-# Refused: creating, writing into a hole of a sparse file or into a
-# compressed file. Then ntfsfix finds the volume clean, tests/ntfs_check.py
+# Stage 2b, creating: files with 8.3 and long names (also beyond Latin-1),
+# directories in directories, 600 files in a new directory and 200 more in
+# the root (index nodes split, the root moved into a block, $MFT grown),
+# written to afterwards. Refused: a name there in other case, a name
+# Win32 does not allow, removing, writing into a hole of a sparse file or
+# into a compressed file. Then ntfsfix finds the volume clean, tests/ntfs_check.py
 # finds every cluster accounted for in $Bitmap and none used twice, ntfs-3g
 # reads every file as expected, and a written file has a new time (the
 # others keep theirs). A volume with a hibernated Windows on it (hiberfil.sys
@@ -84,7 +88,19 @@ for v in 4096:512 512:512 4096:4096; do
     # (the image keeps 600 single free clusters: 2.4 MB of 4 KB clusters)
     test "$(df -B1 --output=avail "$m" | tail -1)" -lt 8388608 || fail "filling stopped with space left"
     both "truncate -s $full \"\$e/sparse.dat\""
-    refused "creating" sh -c "printf x > '$m/NEU.TXT'"
+    # stage 2b
+    both 'echo neu > "$e/NEU.TXT"'
+    both 'mkdir "$e/Neuer Ordner" && echo klein > "$e/Neuer Ordner/klein.txt"'
+    both 'mkdir -p "$e/a/b/c" && echo tief > "$e/a/b/c/Tiefe Datei.txt"'
+    both 'echo umlaut > "$e/Ärger über Öl.txt" && echo omega > "$e/Ωmega Σigma.txt"'
+    both 'mkdir "$e/Neu viele" || exit 1; i=0; while [ $i -lt 600 ]; do echo $i > "$e/Neu viele/Datei mit einem längeren Namen $i.txt" || exit 1; i=$((i + 1)); done'
+    both 'i=0; while [ $i -lt 200 ]; do echo $i > "$e/R$i.DAT" || exit 1; i=$((i + 1)); done'
+    head -c 70000 /dev/urandom > "$d/r.bin"
+    both 'cat "$d/r.bin" >> "$e/Neu viele/Datei mit einem längeren Namen 333.txt"'
+    test "$(cat "$m/Neu viele/Datei mit einem längeren Namen 599.txt")" = 599 || fail "a new file reads back wrong"
+    refused "a name there in other case" mkdir "$m/neu.txt"
+    refused "a name Win32 does not allow" touch "$m/a:b"
+    refused "removing" rm "$m/klein.txt"
     refused "writing into a hole" dd if=/dev/zero of="$m/loch.dat" bs=100 count=1 seek=500000 \
         oflag=seek_bytes conv=notrunc status=none
     patch loch.dat 0 1

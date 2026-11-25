@@ -177,7 +177,8 @@ core directly.
      hibernated; `ofs_ntfs_write` writes data that has its clusters,
      resident data in its MFT record with a new update sequence number,
      and the file's `$STANDARD_INFORMATION` times and archive bit; NTFS
-     has `OFS_CAP_WRITE` (and with 2a `OFS_CAP_RESIZE`) without `OFS_CAP_CREATE`;
+     has `OFS_CAP_WRITE`, with 2a `OFS_CAP_RESIZE`, with 2b `OFS_CAP_CREATE`
+     (removing and renaming give `OFS_ENOTSUP` until 2c);
      `tests/ntfs_write.sh`);
   2. create and resize, with MFT and index updates and `$LogFile` reset --
      2a, sizes, done 2026-11-25: `ofs_ntfs_resize` and writing past the
@@ -190,7 +191,21 @@ core directly.
      Not yet: `$DATA` in an extension record or a runlist larger than its
      record (an attribute list of its own), holes. `tests/ntfs_check.py`
      checks the clusters against `$Bitmap`, the attribute sizes and the
-     index entries. 2b, creating; 2c, removing and renaming: open;
+     index entries. 2b, creating, done 2026-11-25: `ofs_ntfs_create`, files
+     and directories; a free MFT record by `$MFT`'s `$BITMAP` (from 24 on;
+     `$MFT` grows by 16 records, its `$BITMAP` first; `$MFTMirr` follows
+     record 0), the entry into the directory's index B-tree by the
+     volume's `$UpCase` (case-insensitively, then exactly): a full block
+     split at its middle entry, which goes up with the lower half as its
+     child; a full root moved into a block of its own (the root cut first,
+     then the block made in the room that leaves). The record is written
+     before the entry, a block before what points to it. Win32 names, a
+     Win32-and-DOS one for a valid 8.3 name in capitals, no DOS name of its
+     own; the directory's security id. Not yet: a non-resident index
+     `$BITMAP`, `$MFT` or an index beyond its base record.
+     `tests/ntfs_check.py` also walks every index (order, child blocks
+     against the index `$BITMAP`, VCNs), entries against records both ways,
+     `$MFT`'s `$BITMAP` and `$MFTMirr`. 2c, removing and renaming: open;
   3. check.
   Each frontend enables a write operation the moment the table has it.
   No frontend changes.

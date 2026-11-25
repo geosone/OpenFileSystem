@@ -8,8 +8,8 @@
    directory index ($INDEX_ROOT, $INDEX_ALLOCATION with its $BITMAP),
    compressed files (LZNT1, decompressed in idx 4 KB at a time).
    Encrypted files are not read (OFS_NTFS_ECOMP).  Writing in stages:
-   overwriting in place and sizes so far (ofs_ntfs_write and
-   ofs_ntfs_resize, see below).
+   overwriting in place, sizes and creating so far (ofs_ntfs_write,
+   ofs_ntfs_resize and ofs_ntfs_create, see below).
    Device sectors of 512 bytes up to OFS_NTFS_MAXSECT (4096 for 4Kn
    disks).  The interface follows exfat.h, so the DOS
    redirector of EXFAT.SYS can serve NTFS too. */
@@ -21,6 +21,8 @@
 #endif
 /* the buffer ofs_ntfs_mount wants */
 #define OFS_NTFS_BUF (OFS_NTFS_MAXREC * 3 + OFS_NTFS_MAXSECT)
+/* the largest index entry: its header, a $FILE_NAME of 255 characters, a child VCN */
+#define OFS_NTFS_ENTMAX (16 + ((0x42 + 2 * 255 + 7) & ~7) + 8)
 
 #define OFS_NTFS_OK      0
 #define OFS_NTFS_END     1       /* end of directory */
@@ -35,6 +37,8 @@
 #define OFS_NTFS_ENOSPACE -9     /* not yet: a hole, data in an extension record,
                                      a runlist larger than its record */
 #define OFS_NTFS_EFULL  -10      /* no free cluster */
+#define OFS_NTFS_EEXIST -11      /* the name exists (case-insensitively) */
+#define OFS_NTFS_ENAME  -12      /* not a valid Win32 name */
 
 /* attributes as DOS has them */
 #define OFS_NTFS_RDONLY 0x01
@@ -86,6 +90,18 @@ struct ofs_ntfs {
     struct ofs_ntfs_run bmr[4];
     ofs_u8 bm_nruns, log_reset;
     ofs_u32 bm_hint;
+#ifndef OFS_READONLY
+    /* creating: the NTFS minor version, $MFTMirr (where, how many records
+       it copies), the runs of $UpCase (0: none known, no creating), its
+       first block (characters 0-255) and one more (up_blk, or all ones),
+       the index entry going in and the middle one of a split */
+    ofs_u8 ver_minor, mirr_n, up_nruns;
+    ofs_u32 mirr_lcn;
+    struct ofs_ntfs_run upr[4];
+    ofs_u16 up_blk;
+    ofs_u8 up0[512], up1[512];
+    ofs_u8 ent[OFS_NTFS_ENTMAX], ment[OFS_NTFS_ENTMAX];
+#endif
 };
 
 /* A file or directory: its MFT record, size, and the run last used. */
@@ -150,5 +166,16 @@ int ofs_ntfs_write(struct ofs_ntfs *, struct ofs_ntfs_file *, ofs_fsize off, con
    longer fits; the new bytes read as zeros.  OFS_NTFS_EFULL: no space,
    OFS_NTFS_ENOSPACE: not yet so (see above). */
 int ofs_ntfs_resize(struct ofs_ntfs *, struct ofs_ntfs_file *, ofs_fsize size, ofs_u16 time, ofs_u16 date);
+/* Creates an empty file (is_dir 0) or directory named name (len UTF-16
+   units, a valid Win32 name: OFS_NTFS_ENAME else) in dir: a free MFT
+   record ($MFT grows by 16 records when none is free) and an entry in
+   dir's index, ordered by the volume's $UpCase (a full index node is
+   split, a full root moves into an index block).  *pos: where the entry
+   is, for ofs_ntfs_dir_next.  OFS_NTFS_EEXIST: the name is there
+   (case-insensitively); OFS_NTFS_ENOSPACE (not yet): $MFT or the index in
+   more than its base record, a non-resident index $BITMAP, index blocks
+   smaller than 2 KB. */
+int ofs_ntfs_create(struct ofs_ntfs *, struct ofs_ntfs_file *dir, const ofs_u16 *name, unsigned len, int is_dir,
+                    ofs_u16 time, ofs_u16 date, ofs_u32 *pos);
 #endif
 #endif
