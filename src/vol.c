@@ -27,6 +27,11 @@ struct ofs_fs {
                   const ofs_u16 *, unsigned);
     int (*sync)(struct ofs_vol *);
     ofs_fsize max_size;           /* the largest file */
+    /* the attributes (as ofs_setattr) and a time (OFS_TIME_*) of the entry
+       at pos in dir, which is n; NULL: not this file system */
+    int (*setattr)(struct ofs_vol *, struct ofs_node *dir, ofs_u32 pos, struct ofs_node *n, ofs_u8 attr);
+    int (*settime)(struct ofs_vol *, struct ofs_node *dir, ofs_u32 pos, struct ofs_node *n, unsigned which,
+                   ofs_u16 time, ofs_u16 date, ofs_u8 cs10);
 #endif
 };
 
@@ -182,10 +187,27 @@ static int fat_rename(struct ofs_vol *v, struct ofs_node *dir, ofs_u32 pos, stru
 static int fat_sync(struct ofs_vol *v) { return ofs_fat_clean(&v->u.fat); }
 #endif
 
+#ifndef OFS_READONLY
+static int fat_setattr(struct ofs_vol *v, struct ofs_node *dir, ofs_u32 pos, struct ofs_node *n, ofs_u8 attr)
+{
+    return ofs_fat_attr(&v->u.fat, &dir->u.fat.f, pos,
+                        (ofs_u8)((n->attr & ~0x27) | (attr & 0x27)));
+}
+
+static int fat_settime(struct ofs_vol *v, struct ofs_node *dir, ofs_u32 pos, struct ofs_node *n, unsigned which,
+                       ofs_u16 time, ofs_u16 date, ofs_u8 cs10)
+{
+    static const unsigned at[3] = { OFS_FAT_CREATED, OFS_FAT_MODIFIED, OFS_FAT_ACCESSED };
+    (void)n;
+    return ofs_fat_time(&v->u.fat, &dir->u.fat.f, pos, at[which], time, date, cs10);
+}
+#endif
+
 static const struct ofs_fs fs_fat = {
     ofs_fat_probe, fat_mount, fat_root, fat_next, fat_lookup, fat_read, fat_statfs
 #ifndef OFS_READONLY
-    , fat_write, fat_resize, fat_create, fat_empty, fat_remove, fat_rename, fat_sync, 0xFFFFFFFFUL
+    , fat_write, fat_resize, fat_create, fat_empty, fat_remove, fat_rename, fat_sync, 0xFFFFFFFFUL,
+    fat_setattr, fat_settime
 #endif
 };
 #endif
@@ -287,15 +309,31 @@ static int ex_rename(struct ofs_vol *v, struct ofs_node *dir, ofs_u32 pos, struc
 static int ex_sync(struct ofs_vol *v) { return ofs_exfat_clean(&v->u.ex); }
 #endif
 
+#ifndef OFS_READONLY
+static int ex_setattr(struct ofs_vol *v, struct ofs_node *dir, ofs_u32 pos, struct ofs_node *n, ofs_u8 attr)
+{
+    return ofs_exfat_attr(&v->u.ex, &dir->u.ex.f, pos, (ofs_u16)((n->attr & ~0x27) | (attr & 0x27)));
+}
+
+static int ex_settime(struct ofs_vol *v, struct ofs_node *dir, ofs_u32 pos, struct ofs_node *n, unsigned which,
+                      ofs_u16 time, ofs_u16 date, ofs_u8 cs10)
+{
+    static const unsigned at[3] = { OFS_EXFAT_CREATED, OFS_EXFAT_MODIFIED, OFS_EXFAT_ACCESSED };
+    (void)n;
+    return ofs_exfat_time(&v->u.ex, &dir->u.ex.f, pos, at[which], time, date, cs10);
+}
+#endif
+
 static const struct ofs_fs fs_exfat = {
     ofs_exfat_probe, ex_mount, ex_root, ex_next, NULL, ex_read, ex_statfs
 #ifndef OFS_READONLY
     , ex_write, ex_resize, ex_create, ex_empty, ex_remove, ex_rename, ex_sync,
 #ifdef OFS_NARROW
-    0xFFFFFFFFUL
+    0xFFFFFFFFUL,
 #else
-    ~(ofs_fsize)0
+    ~(ofs_fsize)0,
 #endif
+    ex_setattr, ex_settime
 #endif
 };
 #endif
@@ -418,6 +456,20 @@ static int nt_create(struct ofs_vol *v, struct ofs_node *dir, const ofs_u16 *nam
     if (v->host.now) v->host.now(v->dev, &t, &d);
     return nt_err(ofs_ntfs_create(&v->u.ntfs, &dir->u.ntfs, name, len, is_dir, t, d, pos));
 }
+
+static int nt_setattr(struct ofs_vol *v, struct ofs_node *dir, ofs_u32 pos, struct ofs_node *n, ofs_u8 attr)
+{
+    (void)dir; (void)pos;
+    return nt_err(ofs_ntfs_set_attr(&v->u.ntfs, &n->u.ntfs, attr));
+}
+
+static int nt_settime(struct ofs_vol *v, struct ofs_node *dir, ofs_u32 pos, struct ofs_node *n, unsigned which,
+                      ofs_u16 time, ofs_u16 date, ofs_u8 cs10)
+{
+    static const unsigned at[3] = { OFS_NTFS_CREATED, OFS_NTFS_WRITTEN, OFS_NTFS_READ };
+    (void)dir; (void)pos;
+    return nt_err(ofs_ntfs_set_time(&v->u.ntfs, &n->u.ntfs, at[which], time, date, cs10));
+}
 #endif
 
 static const struct ofs_fs fs_ntfs = {
@@ -425,10 +477,11 @@ static const struct ofs_fs fs_ntfs = {
 #ifndef OFS_READONLY
     , nt_write, nt_resize, nt_create, NULL, NULL, NULL, NULL,
 #ifdef OFS_NARROW
-    0xFFFFFFFFUL
+    0xFFFFFFFFUL,
 #else
-    ~(ofs_fsize)0
+    ~(ofs_fsize)0,
 #endif
+    nt_setattr, nt_settime
 #endif
 };
 #endif
@@ -486,7 +539,7 @@ static int iso_statfs(struct ofs_vol *v, ofs_u32 *fr, ofs_u32 *cb, ofs_u32 *cl)
 static const struct ofs_fs fs_iso = {
     NULL, iso_mount, iso_root, iso_next, NULL, iso_read, iso_statfs
 #ifndef OFS_READONLY
-    , NULL, NULL, NULL, NULL, NULL, NULL, NULL, 0
+    , NULL, NULL, NULL, NULL, NULL, NULL, NULL, 0, NULL, NULL
 #endif
 };
 #endif
@@ -545,7 +598,7 @@ static int udf_statfs(struct ofs_vol *v, ofs_u32 *fr, ofs_u32 *cb, ofs_u32 *cl)
 static const struct ofs_fs fs_udf = {
     NULL, udf_mount, udf_root, udf_next, NULL, udf_read, udf_statfs
 #ifndef OFS_READONLY
-    , NULL, NULL, NULL, NULL, NULL, NULL, NULL, 0
+    , NULL, NULL, NULL, NULL, NULL, NULL, NULL, 0, NULL, NULL
 #endif
 };
 #endif
@@ -755,6 +808,43 @@ int ofs_remove(struct ofs_vol *v, struct ofs_node *dir, const ofs_u16 *name, uns
         if (!r) return OFS_ENOTEMPTY;
     }
     return v->fs->remove(v, dir, pos);
+}
+
+/* the entry's position for setattr/settime: NTFS takes the file itself */
+static int meta_entry(struct ofs_vol *v, struct ofs_node *dir, const ofs_u16 *name, unsigned len,
+                      struct ofs_dirent *de, ofs_u32 *pos)
+{
+    int r;
+    if ((r = ofs_lookup(v, dir, name, len, de))) return r;
+#ifndef OFS_NO_NTFS
+    if (v->fs == &fs_ntfs) { *pos = 0; return 0; }
+#endif
+    return entry_pos(v, &de->node, pos);
+}
+
+int ofs_setattr(struct ofs_vol *v, struct ofs_node *dir, const ofs_u16 *name, unsigned len, ofs_u8 attr)
+{
+    static struct ofs_dirent de;
+    ofs_u32 pos;
+    int r;
+    WRITABLE(v);
+    if (!v->fs->setattr) return OFS_ENOTSUP;
+    if ((r = meta_entry(v, dir, name, len, &de, &pos))) return r;
+    de.node.attr = de.attr;
+    return v->fs->setattr(v, dir, pos, &de.node, attr);
+}
+
+int ofs_settime(struct ofs_vol *v, struct ofs_node *dir, const ofs_u16 *name, unsigned len, unsigned which,
+                ofs_u16 time, ofs_u16 date, ofs_u8 cs10)
+{
+    static struct ofs_dirent de;
+    ofs_u32 pos;
+    int r;
+    WRITABLE(v);
+    if (which > OFS_TIME_ACCESSED) return OFS_ENOTSUP;
+    if (!v->fs->settime) return OFS_ENOTSUP;
+    if ((r = meta_entry(v, dir, name, len, &de, &pos))) return r;
+    return v->fs->settime(v, dir, pos, &de.node, which, time, date, cs10);
 }
 
 int ofs_rename(struct ofs_vol *v, struct ofs_node *dir, const ofs_u16 *name, unsigned len,

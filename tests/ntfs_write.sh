@@ -98,6 +98,10 @@ for v in 4096:512 512:512 4096:4096; do
     head -c 70000 /dev/urandom > "$d/r.bin"
     both 'cat "$d/r.bin" >> "$e/Neu viele/Datei mit einem längeren Namen 333.txt"'
     test "$(cat "$m/Neu viele/Datei mit einem längeren Namen 599.txt")" = 599 || fail "a new file reads back wrong"
+    # times and the read-only attribute (utimens, chmod)
+    touch -m -d '2001-02-03 04:05:06.25' "$m/NEU.TXT" || fail "touch -d"
+    touch -a -d '2002-03-04 05:06:07' "$m/NEU.TXT" || fail "touch -a -d"
+    chmod a-w "$m/a/b/c/Tiefe Datei.txt" || fail "chmod a-w"
     refused "a name there in other case" mkdir "$m/neu.txt"
     refused "a name Win32 does not allow" touch "$m/a:b"
     refused "removing" rm "$m/klein.txt"
@@ -115,7 +119,12 @@ for v in 4096:512 512:512 4096:4096; do
     dt=$(( $(date +%s) - $(stat -c %Y "$m/gross.bin") ))
     test "$dt" -ge -5 && test "$dt" -le 300 || fail "gross.bin's time is ${dt}s off (time zone?)"
     test "$(stat -c %Y "$m/SUB/A.B")" = "$t_klein" || fail "SUB/A.B has a new time"
+    test "$(stat -c %y "$m/NEU.TXT")" = "$(date -d '2001-02-03 04:05:06.25' '+%Y-%m-%d %H:%M:%S.250000000 %z')" ||
+        fail "NEU.TXT's modification time: $(stat -c %y "$m/NEU.TXT")"
+    test "$(stat -c %X "$m/NEU.TXT")" = "$(date -d '2002-03-04 05:06:07' +%s)" || fail "NEU.TXT's access time"
     umnt
+    ntfsinfo -F "/a/b/c/Tiefe Datei.txt" "$d/ntfs.img" 2>/dev/null | grep -q "File attributes:.*READONLY" ||
+        fail "Tiefe Datei.txt is not read-only"
     echo "NTFS writing with $c-byte clusters on $s-byte sectors passed"
 done
 # hibernated: read-only

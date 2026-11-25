@@ -271,6 +271,29 @@ static int rename(struct fs_node *dir, const char *name, struct fs_node *to, con
 		return FS_ENAME;
 	return ofs_rename(VOL(dir->vol), NODE(dir), n16, len, NODE(to), t16, tlen);
 }
+
+static int setattr(struct fs_node *dir, const char *name, uint8_t attr)
+{
+	unsigned len = fs_utf8_to16(name, n16, 256);
+
+	if (len > 255)
+		return FS_ENOENT;
+	return ofs_setattr(VOL(dir->vol), NODE(dir), n16, len, attr);
+}
+
+/* FS_TIME_* are OFS_TIME_*'s numbers */
+_Static_assert(FS_TIME_CREATED == OFS_TIME_CREATED && FS_TIME_MODIFIED == OFS_TIME_MODIFIED &&
+		       FS_TIME_ACCESSED == OFS_TIME_ACCESSED,
+	       "FS_TIME_ and OFS_TIME_ differ");
+static int settime(struct fs_node *dir, const char *name, unsigned which, uint16_t time, uint16_t date,
+		   uint8_t cs10)
+{
+	unsigned len = fs_utf8_to16(name, n16, 256);
+
+	if (len > 255)
+		return FS_ENOENT;
+	return ofs_settime(VOL(dir->vol), NODE(dir), n16, len, which, time, date, cs10);
+}
 #endif
 
 const struct fs_driver ofs_gw_driver = {
@@ -281,6 +304,9 @@ const struct fs_driver ofs_gw_driver = {
 	NULL, NULL, NULL, NULL, NULL, NULL,
 #endif
 	statfs,
+#ifndef OFS_READONLY
+	setattr, settime,
+#endif
 };
 
 /* from the module's init: its heap owner holds the volumes' buffers */

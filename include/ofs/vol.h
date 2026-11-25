@@ -181,5 +181,16 @@ int ofs_rename(struct ofs_vol *, struct ofs_node *dir, const ofs_u16 *name, unsi
                struct ofs_node *to, const ofs_u16 *to_name, unsigned to_len);
 /* What is written reaches the disk's structures (the dirty bit cleared). */
 int ofs_sync(struct ofs_vol *);
+/* The attributes of the entry name in dir: OFS_ATTR_RDONLY, _HIDDEN,
+   _SYSTEM, _ARCH as attr has them (the directory bit stays). */
+int ofs_setattr(struct ofs_vol *, struct ofs_node *dir, const ofs_u16 *name, unsigned len, ofs_u8 attr);
+/* A time of the entry name in dir, as a local DOS time with cs10 10 ms
+   units (FAT keeps 2 s and no access time of day, exFAT 10 ms, NTFS
+   all). */
+#define OFS_TIME_CREATED  0
+#define OFS_TIME_MODIFIED 1
+#define OFS_TIME_ACCESSED 2
+int ofs_settime(struct ofs_vol *, struct ofs_node *dir, const ofs_u16 *name, unsigned len, unsigned which,
+                ofs_u16 time, ofs_u16 date, ofs_u8 cs10);
 #endif
 #endif

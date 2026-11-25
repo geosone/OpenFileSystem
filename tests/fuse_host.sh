@@ -11,8 +11,8 @@
 # The volume is mounted with ofsfuse a second time and compared again.
 #
 # NTFS: tests/ntfs_image.sh's volume (ntfs-3g made it: compressed and
-# sparse files, an attribute list ...) read through ofsfuse, read-only,
-# compared with its files.
+# sparse files, an attribute list ...) read through ofsfuse and compared
+# with its files (writing NTFS: tests/ntfs_write.sh).
 #
 # ISO 9660 (xorriso): the same tree with Rock Ridge, with Joliet only
 # (also long Joliet names), plain (8.3 names: contents compared), each
@@ -82,6 +82,10 @@ tree() {
 	both 'truncate -s 70000 "SUB/größe 513.bin"'
 	both 'printf "angehängt\r\n" >> README.TXT'
 	both 'cp README.TXT "SUB/Kopie von README.TXT"'
+	# times and the read-only attribute: utimens and chmod
+	both "touch -m -d '2001-02-03 04:05:06' README.TXT"
+	both "touch -m -d '1999-12-31 23:59:58' 'SUB/größe 0.bin'"
+	both 'chmod a-w KLEINER.TXT'
 	# a name that exists already, in another case: the volume refuses or
 	# replaces as the file system decides -- skipped (FAT is case-blind)
 }
@@ -118,21 +122,29 @@ for kind in fat12 fat16 fat32 exfat; do
 	esac
 	mount_ofs -o ro "$img"
 	compare "$mnt" "$kind: the tree mounted again"
+	for f in README.TXT "SUB/größe 0.bin"; do
+		[ "$(stat -c %Y "$mnt/$f")" = "$(stat -c %Y "$ref/$f")" ] || fail "$kind: the time of $f: $(stat -c %y "$mnt/$f")"
+	done
+	[ ! -w "$mnt/KLEINER.TXT" ] && [ "$(stat -c %a "$mnt/KLEINER.TXT")" = 444 ] || fail "$kind: KLEINER.TXT not read-only"
+	case $kind in fat*)
+		command -v mdir >/dev/null && { mdir -i "$img" ::README.TXT | grep -q '2001-02-03  *4:05' ||
+			{ mdir -i "$img" ::README.TXT >&2; fail "$kind: mtools reads another time"; }; }
+		command -v mattrib >/dev/null && { mattrib -i "$img" ::KLEINER.TXT | cut -c1-12 | grep -q R ||
+			{ mattrib -i "$img" ::KLEINER.TXT >&2; fail "$kind: mtools finds KLEINER.TXT writable"; }; }
+	esac
 	umount_ofs
 	linux_view "$img" "$kind"
 	echo "$kind passed"
 done
 
-# NTFS, read-only: the volume of tests/ntfs_image.sh (it needs udisksctl
-# and ntfs-3g)
+# NTFS: the volume of tests/ntfs_image.sh (it needs udisksctl and ntfs-3g)
 if command -v mkntfs >/dev/null && command -v udisksctl >/dev/null && command -v ntfs-3g >/dev/null; then
 	sh "$here/tests/ntfs_image.sh" "$work/ntfs" 64 4096 >/dev/null
 	mount_ofs "$work/ntfs/ntfs.img"
 	ref=$work/ntfs/files
 	compare "$mnt" "ntfs: the tree through ofsfuse"
-	if touch "$mnt/neu.txt" 2>/dev/null; then fail "ntfs: writable"; fi
 	umount_ofs
-	echo "ntfs passed (read-only)"
+	echo "ntfs passed (read; writing: tests/ntfs_write.sh)"
 else
 	echo "ntfs skipped (no mkntfs, udisksctl or ntfs-3g)"
 fi
@@ -207,7 +219,12 @@ if command -v mkudffs >/dev/null && command -v udisksctl >/dev/null; then
 		for bs in 512 2048; do
 			img=$work/udf.img
 			rm -f "$img"; truncate -s 64M "$img"
-			mkudffs -q --media-type=hd --udfrev=$rev --blocksize=$bs --label=OFSUDF "$img" >/dev/null || fail "mkudffs $rev $bs"
+			# an older udftools makes no revision above 2.01 on a disk
+			if ! mkudffs --media-type=hd --udfrev=$rev --blocksize=$bs --label=OFSUDF "$img" >"$work/mkudffs.txt" 2>&1; then
+				grep -q "not currently supported" "$work/mkudffs.txt" || { cat "$work/mkudffs.txt" >&2; fail "mkudffs $rev $bs"; }
+				echo "udf $rev $bs skipped (this mkudffs cannot make it)"
+				continue
+			fi
 			loop=$(udisksctl loop-setup --no-user-interaction -f "$img" | sed -n 's/.* as \(\/dev\/[a-z0-9]*\)\.$/\1/p')
 			udisksctl mount --no-user-interaction -b "$loop" >/dev/null || fail "udf $rev $bs: udisksctl mount"
 			lm=$(lsblk -no MOUNTPOINT "$loop")

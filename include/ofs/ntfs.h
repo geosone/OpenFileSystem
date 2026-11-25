@@ -166,6 +166,16 @@ int ofs_ntfs_write(struct ofs_ntfs *, struct ofs_ntfs_file *, ofs_fsize off, con
    longer fits; the new bytes read as zeros.  OFS_NTFS_EFULL: no space,
    OFS_NTFS_ENOSPACE: not yet so (see above). */
 int ofs_ntfs_resize(struct ofs_ntfs *, struct ofs_ntfs_file *, ofs_fsize size, ofs_u16 time, ofs_u16 date);
+/* A time of f (OFS_NTFS_CREATED, _WRITTEN, _READ: their offsets in
+   $STANDARD_INFORMATION) from a local DOS time and 10 ms units, or its
+   attributes (OFS_NTFS_RDONLY, _HIDDEN, _SYSTEM, _ARCH; the others kept):
+   in $STANDARD_INFORMATION and the directory entries that repeat it. */
+#define OFS_NTFS_CREATED 0x00
+#define OFS_NTFS_WRITTEN 0x08
+#define OFS_NTFS_READ    0x18
+int ofs_ntfs_set_time(struct ofs_ntfs *, struct ofs_ntfs_file *, unsigned which, ofs_u16 time, ofs_u16 date,
+                      ofs_u8 cs10);
+int ofs_ntfs_set_attr(struct ofs_ntfs *, struct ofs_ntfs_file *, ofs_u8 attr);
 /* Creates an empty file (is_dir 0) or directory named name (len UTF-16
    units, a valid Win32 name: OFS_NTFS_ENAME else) in dir: a free MFT
    record ($MFT grows by 16 records when none is free) and an entry in

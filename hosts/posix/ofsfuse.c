@@ -415,18 +415,70 @@ static int op_fsync(const char *path, int datasync, struct fuse_file_info *fi)
 }
 #endif
 
-/* accepted, not stored: cp -p, touch and rsync -a still work */
+#ifndef OFS_READONLY
+/* a time as the local DOS form and its 10 ms units (0/0 before 1980) */
+static void todos(const struct timespec *ts, ofs_u16 *t, ofs_u16 *d, ofs_u8 *cs10)
+{
+    struct tm tm;
+    time_t s = ts->tv_sec;
+    *t = *d = 0; *cs10 = 0;
+    if (!localtime_r(&s, &tm) || tm.tm_year < 80 || tm.tm_year > 207) return;
+    *d = (ofs_u16)((tm.tm_year - 80) << 9 | (tm.tm_mon + 1) << 5 | tm.tm_mday);
+    *t = (ofs_u16)(tm.tm_hour << 11 | tm.tm_min << 5 | tm.tm_sec / 2);
+    *cs10 = (ofs_u8)((tm.tm_sec & 1) * 100 + ts->tv_nsec / 10000000);
+}
+
+/* tv[0] the access, tv[1] the modification time (UTIME_NOW, UTIME_OMIT) */
+static int op_utimens(const char *path, const struct timespec tv[2], struct fuse_file_info *fi)
+{
+    static const unsigned which[2] = { OFS_TIME_ACCESSED, OFS_TIME_MODIFIED };
+    ofs_u16 name[255], t, d;
+    ofs_u8 cs;
+    struct ofs_node dir;
+    struct timespec now_ts, ts;
+    int len, r, i;
+    (void)fi;
+    if (!strcmp(path, "/")) return 0;            /* the root has no times */
+    if ((r = walk(path, &dir, name, &len))) return r;
+    clock_gettime(CLOCK_REALTIME, &now_ts);
+    for (i = 0; i < 2; ++i) {
+        if (tv && tv[i].tv_nsec == UTIME_OMIT) continue;
+        ts = !tv || tv[i].tv_nsec == UTIME_NOW ? now_ts : tv[i];
+        todos(&ts, &t, &d, &cs);
+        if (!d) return -EINVAL;
+        if ((r = ofs_settime(&vol, &dir, name, (unsigned)len, which[i], t, d, cs))) return err(r);
+    }
+    return 0;
+}
+
+/* the owner's write bit is the read-only attribute; the rest has no place
+   (fill shows 0644/0444) */
+static int op_chmod(const char *path, mode_t mode, struct fuse_file_info *fi)
+{
+    static struct ofs_dirent de;
+    ofs_u16 name[255];
+    struct ofs_node dir;
+    int len, r;
+    (void)fi;
+    if (!strcmp(path, "/")) return 0;
+    if ((r = walk(path, &dir, name, &len))) return r;
+    if ((r = ofs_lookup(&vol, &dir, name, (unsigned)len, &de))) return err(r);
+    return err(ofs_setattr(&vol, &dir, name, (unsigned)len,
+                           (ofs_u8)((mode & 0200) ? de.attr & ~OFS_ATTR_RDONLY : de.attr | OFS_ATTR_RDONLY)));
+}
+#else
 static int op_utimens(const char *path, const struct timespec tv[2], struct fuse_file_info *fi)
 {
     (void)path; (void)tv; (void)fi;
-    return 0;
+    return -EROFS;
 }
 
 static int op_chmod(const char *path, mode_t mode, struct fuse_file_info *fi)
 {
     (void)path; (void)mode; (void)fi;
-    return 0;
+    return -EROFS;
 }
+#endif
 
 static int op_chown(const char *path, uid_t uid, gid_t gid, struct fuse_file_info *fi)
 {

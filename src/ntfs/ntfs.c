@@ -1464,10 +1464,28 @@ static int dup_info(struct ofs_ntfs *v, ofs_u32 dir, ofs_u32 no, const ofs_u8 *s
     }
 }
 
+/* what ofs_ntfs_set_time/_attr change in $STANDARD_INFORMATION */
+struct si_change {
+    int at;                      /* a time's offset there, -1: none */
+    ofs_u16 time, date;
+    ofs_u8 cs10;
+    int attr;                    /* the attributes (RDONLY, HIDDEN, SYSTEM, ARCH), -1: as they are */
+};
+
+static int finish_si(struct ofs_ntfs *v, struct ofs_ntfs_file *f, ofs_u16 time, ofs_u16 date, int sizes,
+                     const struct si_change *c);
+
 /* $STANDARD_INFORMATION (the time written, the archive bit) and, with
    sizes, the sizes of the $FILE_NAMEs of the base record no (in rec2), the
    record written; then the entries in the directories (dup_info) */
 static int finish(struct ofs_ntfs *v, struct ofs_ntfs_file *f, ofs_u16 time, ofs_u16 date, int sizes)
+{
+    return finish_si(v, f, time, date, sizes, 0);
+}
+
+/* the same, or with c the change asked for instead of the write's */
+static int finish_si(struct ofs_ntfs *v, struct ofs_ntfs_file *f, ofs_u16 time, ofs_u16 date, int sizes,
+                     const struct si_change *c)
 {
     ofs_u8 *val, *b, si[0x24];
     const ofs_u8 *a, *d;
@@ -1479,12 +1497,18 @@ static int finish(struct ofs_ntfs *v, struct ofs_ntfs_file *f, ofs_u16 time, ofs
     b = v->rec2;
     if (!(a = find_attr(v, b, AT_STD, 0)) || !(val = (ofs_u8 *)res_value(a, &len)) || len < 36)
         return OFS_NTFS_EBAD;
-    if (date) {
-        t = nt_time(time, date, v->tz);
-        wr64(val + 0x08, t);                    /* written */
-        wr64(val + 0x10, t);                    /* record changed */
+    if (c) {
+        if (c->at >= 0) wr64(val + c->at, nt_time(c->time, c->date, v->tz) + (ofs_u64)c->cs10 * 100000UL);
+        if (c->attr >= 0)
+            wr32(val + 0x20, (rd32(val + 0x20) & ~(ofs_u32)0x27) | ((ofs_u32)c->attr & 0x27));
+    } else {
+        if (date) {
+            t = nt_time(time, date, v->tz);
+            wr64(val + 0x08, t);                /* written */
+            wr64(val + 0x10, t);                /* record changed */
+        }
+        if (!(rd16(b + 0x16) & 2)) wr32(val + 0x20, rd32(val + 0x20) | OFS_NTFS_ARCH);   /* files only */
     }
-    if (!(rd16(b + 0x16) & 2)) wr32(val + 0x20, rd32(val + 0x20) | OFS_NTFS_ARCH);   /* files only */
     memcpy(si, val, 0x24);
     if ((d = find_attr(v, b, AT_DATA, 0)))
         alloc = d[8] ? rd64(d + 0x28) : (rd32(d + 0x10) + 7) & ~7UL;
@@ -1558,6 +1582,24 @@ static int cut_runs(struct ofs_ntfs *v, struct ofs_ntfs_run *rs, unsigned *n, of
     }
     while (*n && !rs[*n - 1].len) --*n;
     return OFS_NTFS_OK;
+}
+
+int ofs_ntfs_set_time(struct ofs_ntfs *v, struct ofs_ntfs_file *f, unsigned which, ofs_u16 time, ofs_u16 date,
+                      ofs_u8 cs10)
+{
+    struct si_change c;
+    if (!v->write) return OFS_NTFS_EROFS;
+    if (which != OFS_NTFS_CREATED && which != OFS_NTFS_WRITTEN && which != OFS_NTFS_READ) return OFS_NTFS_EBAD;
+    c.at = (int)which; c.time = time; c.date = date; c.cs10 = cs10; c.attr = -1;
+    return finish_si(v, f, 0, 0, 0, &c);
+}
+
+int ofs_ntfs_set_attr(struct ofs_ntfs *v, struct ofs_ntfs_file *f, ofs_u8 attr)
+{
+    struct si_change c;
+    if (!v->write) return OFS_NTFS_EROFS;
+    c.at = -1; c.time = c.date = 0; c.cs10 = 0; c.attr = attr & 0x27;
+    return finish_si(v, f, 0, 0, 0, &c);
 }
 
 int ofs_ntfs_resize(struct ofs_ntfs *v, struct ofs_ntfs_file *f, ofs_fsize size, ofs_u16 time, ofs_u16 date)
