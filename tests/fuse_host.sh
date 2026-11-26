@@ -142,9 +142,77 @@ for kind in fat12 fat16 fat32 exfat; do
 	echo "$kind passed"
 done
 
-# Extended attributes: OS/2's and NT's "EA DATA. SF" on FAT12/16 as user.*
-# xattrs; FAT32 and exFAT have none yet. The EA file is checked against the
-# layout by tests/fat_ea_check.py, the volume by fsck.fat.
+# FAT32 and exFAT: the EA files are not shown and cannot be made; removing
+# and renaming (also into another directory) take them along; a left-over
+# EA file beside an unmarked file is not its EAs; an empty directory with
+# only a left-over one can be removed.
+sf_tests() {
+	python3 -I - "$mnt" <<'PY' || fail "$1: the EA files beside the files"
+import errno, os, sys
+m = sys.argv[1]
+def err(f, *a):
+    try:
+        f(*a)
+    except OSError as e:
+        return e.errno
+    return 0
+names = os.listdir(m)
+assert not [n for n in names if n.upper().endswith(' EA. SF')], names
+assert not os.path.exists(os.path.join(m, 'EINS.TXT EA. SF'))
+assert err(open, os.path.join(m, 'x EA. SF'), 'w') in (errno.EINVAL, errno.ENAMETOOLONG, errno.EPERM, errno.EACCES)
+os.mkdir(os.path.join(m, 'ZIEL'))
+os.rename(os.path.join(m, 'DREI.TXT'), os.path.join(m, 'ZIEL', 'drei neu.txt'))
+assert os.getxattr(os.path.join(m, 'ZIEL', 'drei neu.txt'), 'user.b') == b'B' * 3000
+os.rename(os.path.join(m, 'ZIEL', 'drei neu.txt'), os.path.join(m, 'DREI.TXT'))
+os.rmdir(os.path.join(m, 'ZIEL'))
+os.remove(os.path.join(m, 'Vier.txt'))
+# a new file of a removed one's name has none
+open(os.path.join(m, 'Vier.txt'), 'w').close()
+assert os.listxattr(os.path.join(m, 'Vier.txt')) == []
+os.remove(os.path.join(m, 'Vier.txt'))
+PY
+}
+
+# the image read without OpenFileSystem: the marks (fat_ea_check.py --mark),
+# the EA files' FEALISTs (FAT32 through mtools, exFAT through dump.exfat's
+# view of the directory), fsck
+sf_check() {
+	case $1 in
+	fat32)
+		fsck.fat -n "$2" > "$work/fsck.txt" 2>&1 || { cat "$work/fsck.txt" >&2; fail "$1: fsck.fat"; }
+		mdir -a -i "$2" ::/ > "$work/mdir.txt" 2>&1 || { cat "$work/mdir.txt" >&2; fail "$1: mdir"; }
+		for f in 'EINS.TXT' 'DREI.TXT'; do
+			grep -q "$f EA. SF" "$work/mdir.txt" || { cat "$work/mdir.txt" >&2; fail "$1: no $f EA. SF"; }
+		done
+		! grep -qi "vier.txt EA. SF\|ORDNER EA. SF" "$work/mdir.txt" || { cat "$work/mdir.txt" >&2; fail "$1: left-over EA files"; }
+		rm -f "$work/eins.sf"; mtype -i "$2" "::/EINS.TXT EA. SF" > "$work/eins.sf"
+		python3 -I "$here/tests/fat_ea_check.py" --fealist "$work/eins.sf" > "$work/fl.txt" &&
+			grep -qx 'comment:1280' "$work/fl.txt" || { cat "$work/fl.txt" >&2; fail "$1: the FEALIST of EINS.TXT"; }
+		python3 -I "$here/tests/fat_ea_check.py" --mark "$2" 'EINS    TXT' > "$work/mark.txt" &&
+			grep -qx 40 "$work/mark.txt" || { cat "$work/mark.txt" >&2; fail "$1: EINS.TXT's mark"; }
+		python3 -I "$here/tests/fat_ea_check.py" --mark "$2" 'ORDNER     ' > "$work/mark.txt" &&
+			grep -qx 00 "$work/mark.txt" || { cat "$work/mark.txt" >&2; fail "$1: ORDNER's mark"; } ;;
+	exfat)
+		fsck.exfat -n "$2" > "$work/fsck.txt" 2>&1 || { cat "$work/fsck.txt" >&2; fail "$1: fsck.exfat"; }
+		python3 -I "$here/tests/fat_ea_check.py" --exfat "$2" > "$work/ex.txt" || { cat "$work/ex.txt" >&2; fail "$1: the EA files"; }
+		grep -qx 'EINS.TXT 40 comment:1280' "$work/ex.txt" && grep -qx 'DREI.TXT 40 a:1 b:3000' "$work/ex.txt" &&
+			[ "$(wc -l < "$work/ex.txt")" -eq 2 ] || { cat "$work/ex.txt" >&2; fail "$1: the EA files"; } ;;
+	esac
+	mount_ofs -o ro "$2"
+	python3 -I - "$mnt" <<'PY' || fail "$1: xattrs mounted again"
+import os, sys
+m = sys.argv[1]
+assert os.getxattr(os.path.join(m, 'EINS.TXT'), 'user.comment') == b'Ein deutlich laengerer Kommentar' * 40
+assert os.getxattr(os.path.join(m, 'DREI.TXT'), 'user.b') == b'B' * 3000
+assert os.listxattr(os.path.join(m, 'ORDNER')) == []
+PY
+	umount_ofs
+}
+
+# Extended attributes as user.* xattrs: OS/2's and NT's "EA DATA. SF" on
+# FAT12/16, FAT32.IFS's "name EA. SF" files on FAT32 and exFAT. The EA files
+# are checked against the layout by tests/fat_ea_check.py, the volume by
+# fsck.fat / fsck.exfat.
 for kind in fat12 fat16 fat32 exfat; do
 	img=$work/ea-$kind.img
 	case $kind in
@@ -158,19 +226,6 @@ for kind in fat12 fat16 fat32 exfat; do
 	printf 'zwei\r\n' > "$mnt/Zwei mit langem Namen.txt"
 	printf 'drei\r\n' > "$mnt/DREI.TXT"
 	mkdir "$mnt/ORDNER"
-	case $kind in fat32|exfat)
-		python3 -I - "$mnt/EINS.TXT" <<'PY' || fail "$kind: xattrs are not refused"
-import errno, os, sys
-try:
-    os.setxattr(sys.argv[1], 'user.x', b'1')
-except OSError as e:
-    sys.exit(e.errno not in (errno.EOPNOTSUPP, errno.ENOTSUP))
-sys.exit(1)
-PY
-		umount_ofs
-		echo "$kind: no EAs (refused) passed"
-		continue
-	esac
 	head -c 40000 /dev/urandom > "$work/eabig"
 	python3 -I - "$mnt" "$work/eabig" <<'PY' || fail "$kind: xattrs through ofsfuse"
 import errno, os, sys
@@ -211,10 +266,19 @@ assert os.getxattr(os.path.join(m, 'Vier.txt'), 'user.gross') == big
 os.removexattr(d, 'user.ordner')
 assert os.listxattr(d) == []
 PY
-	sz1=$(stat -c %s "$mnt/EA DATA. SF")
-	rm "$mnt/Vier.txt"
-	sz2=$(stat -c %s "$mnt/EA DATA. SF")
-	[ "$sz2" -lt "$sz1" ] || fail "$kind: removing a file kept its EAs ($sz1 -> $sz2)"
+	case $kind in
+	fat12|fat16)
+		sz1=$(stat -c %s "$mnt/EA DATA. SF")
+		rm "$mnt/Vier.txt"
+		sz2=$(stat -c %s "$mnt/EA DATA. SF")
+		[ "$sz2" -lt "$sz1" ] || fail "$kind: removing a file kept its EAs ($sz1 -> $sz2)" ;;
+	*)
+		sf_tests "$kind"
+		umount_ofs
+		sf_check "$kind" "$img"
+		echo "$kind EAs passed"
+		continue ;;
+	esac
 	umount_ofs
 	fsck.fat -n "$img" > "$work/fsck.txt" 2>&1 || { cat "$work/fsck.txt" >&2; fail "$kind: fsck.fat"; }
 	mount_ofs -o ro "$img"

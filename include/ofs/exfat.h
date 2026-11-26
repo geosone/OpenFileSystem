@@ -114,6 +114,8 @@ struct ofs_exfat_where {
 struct ofs_exfat_ent {
     ofs_u32 pos;                 /* byte offset of the file entry */
     ofs_u16 attr, time, date;
+    ofs_u8 eas;                  /* FAT32.IFS's EA mark (byte 6 of the file entry):
+                                    40h EAs in "name EA. SF", 80h critical ones */
     struct ofs_exfat_file file;
     ofs_u8 name_len;
     ofs_u16 name[255];
@@ -155,6 +157,9 @@ int ofs_exfat_rename(struct ofs_exfat *, struct ofs_exfat_file *dir, ofs_u32 pos
                     const ofs_u16 *name, unsigned len, ofs_u32 *newpos);
 /* Attributes (the directory bit is kept). */
 int ofs_exfat_attr(struct ofs_exfat *, struct ofs_exfat_file *dir, ofs_u32 pos, ofs_u16 attr);
+/* FAT32.IFS's EA mark of the file entry at pos (byte 6, reserved in the
+   specification). */
+int ofs_exfat_eamark(struct ofs_exfat *, struct ofs_exfat_file *dir, ofs_u32 pos, ofs_u8 mark);
 /* A time stamp: OFS_EXFAT_CREATED, _MODIFIED or _ACCESSED; cs10 10 ms units. */
 #define OFS_EXFAT_CREATED  8
 #define OFS_EXFAT_MODIFIED 12

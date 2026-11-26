@@ -142,6 +142,7 @@ struct ofs_dirent {
     ofs_u8 name_len;
     ofs_u16 name[255];            /* UTF-16 */
     ofs_u8 attr;
+    ofs_u8 eas;                   /* FAT32, exFAT: FAT32.IFS's EA mark (40h, 80h) */
     ofs_u16 time, date;           /* last written, local DOS form */
     struct ofs_node node;
 };
@@ -195,7 +196,10 @@ int ofs_setattr(struct ofs_vol *, struct ofs_node *dir, const ofs_u16 *name, uns
 int ofs_settime(struct ofs_vol *, struct ofs_node *dir, const ofs_u16 *name, unsigned len, unsigned which,
                 ofs_u16 time, ofs_u16 date, ofs_u8 cs10);
 /* Extended attributes of the entry name in dir: OS/2's and Windows NT's
-   on FAT12/16 ("EA DATA. SF"), OFS_ENOTSUP elsewhere for now.  Names are
+   on FAT12/16 ("EA DATA. SF"), OS/2 FAT32.IFS's on FAT32 and exFAT (a
+   hidden "name EA. SF" beside the file, which ofs_next and ofs_lookup do
+   not show and ofs_create and ofs_rename refuse as a name; ofs_remove and
+   ofs_rename take it along), OFS_ENOTSUP elsewhere for now.  Names are
    1-255 bytes of the code page, compared without case; a file's EAs hold
    at most 65535 bytes together.  ofs_setea: OFS_EA_SET, _CREATE (OFS_EEXIST
    when it is there), _REPLACE (OFS_ENOATTR when not), _REMOVE. */

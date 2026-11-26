@@ -356,6 +356,14 @@ int ofs_fat_dir_next(struct ofs_fat *v, struct ofs_fat_file *d, ofs_u32 *pos, st
         ent->ea = v->bits == 32 ? 0 : rd16(e + 20);
         ent->attr = e[11];
         ent->ntcase = e[12];
+        ent->eas = 0;
+        if (v->bits == 32) {
+            /* FAT32.IFS before 0.97 marked with EAh/ECh, the case bits lost */
+            if (e[12] == 0xEA || e[12] == 0xEC) {
+                ent->eas = e[12] == 0xEC ? OFS_FAT_EAS_CRITICAL : OFS_FAT_EAS;
+                ent->ntcase = 0;
+            } else ent->eas = (ofs_u8)(e[12] & 0xC0);
+        }
         ent->ctime_cs = e[13];
         ent->ctime = rd16(e + 14);
         ent->cdate = rd16(e + 16);
@@ -844,14 +852,19 @@ static int check_name(const ofs_u16 *name, unsigned len)
 static int add(struct ofs_fat *v, struct ofs_fat_file *d, const ofs_u16 *name, unsigned len, ofs_u32 *pos)
 {
     char fcb[11];
-    ofs_u8 ntcase;
+    ofs_u8 ntcase, keep;
     unsigned parts;
     int r;
     if ((r = make_short(v, d, name, len, fcb, &ntcase)) < 0) return r;
     parts = r ? (len + 12) / 13 : 0;
     memcpy(se, fcb, 11);
     if ((ofs_u8)se[0] == 0xE5) se[0] = 0x05;
-    se[12] = ntcase;
+    /* FAT32: FAT32.IFS's EA mark stays (a renamed file keeps its EAs) */
+    if (v->bits != 32) keep = 0;
+    else if (se[12] == 0xEA) keep = OFS_FAT_EAS;
+    else if (se[12] == 0xEC) keep = OFS_FAT_EAS_CRITICAL;
+    else keep = (ofs_u8)(se[12] & 0xC0);
+    se[12] = (ofs_u8)(ntcase | keep);
     if ((r = place(v, d, parts + 1, pos)) != 0) return r;
     if ((r = put_set(v, d, *pos, name, len, parts)) != 0) return r;
     *pos += 32UL * parts;
@@ -1052,6 +1065,16 @@ int ofs_fat_create_fcb(struct ofs_fat *v, struct ofs_fat_file *d, const char fcb
     wr16(se + 22, time); wr16(se + 24, date);
     if ((r = place(v, d, 1, pos)) != 0) return r;
     return put_entry(v, d, *pos, se);
+}
+
+int ofs_fat_eamark(struct ofs_fat *v, struct ofs_fat_file *d, ofs_u32 pos, ofs_u8 mark)
+{
+    int r;
+    if (v->bits != 32) return OFS_FAT_ENOTSUP;
+    if ((r = change(v, d, pos)) != 0) return r;
+    if (se[12] == 0xEA || se[12] == 0xEC) se[12] = 0;
+    se[12] = (ofs_u8)((se[12] & 0x3F) | (mark & 0xC0));
+    return put_entry(v, d, pos, se);
 }
 
 int ofs_fat_set_ea(struct ofs_fat *v, struct ofs_fat_file *d, ofs_u32 pos, ofs_u16 handle)

@@ -37,6 +37,10 @@ struct ofs_fs {
        EA_LIST; NULL: none */
     int (*ea)(struct ofs_vol *, struct ofs_node *dir, ofs_u32 pos, int op, const char *name,
               void OFS_FAR *buf, ofs_u16 size, ofs_u16 *len);
+#ifndef OFS_READONLY
+    /* FAT32.IFS's EA mark of the entry at pos (FAT32, exFAT); NULL: none */
+    int (*eamark)(struct ofs_vol *, struct ofs_node *dir, ofs_u32 pos, ofs_u8 mark);
+#endif
 };
 #define EA_GET  8
 #define EA_LIST 9
@@ -111,6 +115,7 @@ static void fat_ent(struct ofs_vol *v, struct ofs_node *dir, const struct ofs_fa
     de->name_len = e->name_len;
     memcpy(de->name, e->name, e->name_len * sizeof(ofs_u16));
     de->attr = n->attr = e->attr;
+    de->eas = e->eas;
     de->time = e->time;
     de->date = e->date;
     n->dir = (e->attr & OFS_FAT_DIR) != 0;
@@ -207,6 +212,11 @@ static int fat_settime(struct ofs_vol *v, struct ofs_node *dir, ofs_u32 pos, str
     (void)n;
     return ofs_fat_time(&v->u.fat, &dir->u.fat.f, pos, at[which], time, date, cs10);
 }
+
+static int fat_eamark(struct ofs_vol *v, struct ofs_node *dir, ofs_u32 pos, ofs_u8 mark)
+{
+    return ofs_fat_eamark(&v->u.fat, &dir->u.fat.f, pos, mark);
+}
 #endif
 
 static int fat_ea(struct ofs_vol *v, struct ofs_node *dir, ofs_u32 pos, int op, const char *name,
@@ -236,6 +246,9 @@ static const struct ofs_fs fs_fat = {
     fat_setattr, fat_settime
 #endif
     , fat_ea
+#ifndef OFS_READONLY
+    , fat_eamark
+#endif
 };
 #endif
 
@@ -272,6 +285,7 @@ static int ex_next(struct ofs_vol *v, struct ofs_node *dir, ofs_u32 *pos, struct
     de->name_len = xent.name_len;
     memcpy(de->name, xent.name, xent.name_len * sizeof(ofs_u16));
     de->attr = n->attr = (ofs_u8)xent.attr;
+    de->eas = xent.eas;
     de->time = xent.time;
     de->date = xent.date;
     n->dir = (xent.attr & OFS_EXFAT_DIR) != 0;
@@ -349,6 +363,11 @@ static int ex_settime(struct ofs_vol *v, struct ofs_node *dir, ofs_u32 pos, stru
     (void)n;
     return ofs_exfat_time(&v->u.ex, &dir->u.ex.f, pos, at[which], time, date, cs10);
 }
+
+static int ex_eamark(struct ofs_vol *v, struct ofs_node *dir, ofs_u32 pos, ofs_u8 mark)
+{
+    return ofs_exfat_eamark(&v->u.ex, &dir->u.ex.f, pos, mark);
+}
 #endif
 
 static const struct ofs_fs fs_exfat = {
@@ -363,6 +382,9 @@ static const struct ofs_fs fs_exfat = {
     ex_setattr, ex_settime
 #endif
     , NULL
+#ifndef OFS_READONLY
+    , ex_eamark
+#endif
 };
 #endif
 
@@ -512,6 +534,9 @@ static const struct ofs_fs fs_ntfs = {
     nt_setattr, nt_settime
 #endif
     , NULL
+#ifndef OFS_READONLY
+    , NULL
+#endif
 };
 #endif
 
@@ -571,6 +596,9 @@ static const struct ofs_fs fs_iso = {
     , NULL, NULL, NULL, NULL, NULL, NULL, NULL, 0, NULL, NULL
 #endif
     , NULL
+#ifndef OFS_READONLY
+    , NULL
+#endif
 };
 #endif
 
@@ -631,6 +659,9 @@ static const struct ofs_fs fs_udf = {
     , NULL, NULL, NULL, NULL, NULL, NULL, NULL, 0, NULL, NULL
 #endif
     , NULL
+#ifndef OFS_READONLY
+    , NULL
+#endif
 };
 #endif
 
@@ -716,13 +747,64 @@ int ofs_root(struct ofs_vol *v, struct ofs_node *n)
     return 0;
 }
 
-int ofs_next(struct ofs_vol *v, struct ofs_node *dir, ofs_u32 *pos, struct ofs_dirent *de)
+/* ---- FAT32.IFS's extended attributes on FAT32 and exFAT ----
+   OS/2's FAT32.IFS keeps a file's EAs in a file of its own beside it, its
+   long name with " EA. SF" appended (hidden, system, read-only), and marks
+   the file's entry (FAT32: byte 0Ch beside the NT case bits; exFAT: byte 6
+   of the file entry) 40h, or 80h when one of them is critical.  The file
+   holds an FEALIST: cbList (4 bytes, counting itself), then the EAs as in
+   "EA DATA. SF": flags, name length, value length (word), the name, a NUL,
+   the value.  Only a marked file has EAs: an EA file beside an unmarked
+   one is left over (its file deleted by a system that knows nothing of
+   it) and is overwritten by the first EA set.  The EA files are not shown
+   and their names cannot be created; removing and renaming a file takes
+   its EA file along.  Own code after the layout. */
+static int sidecar(const struct ofs_vol *v)
 {
-    if (!dir->dir) return OFS_ENOTDIR;
-    return v->fs->next(v, dir, pos, de);
+    (void)v;
+#ifndef OFS_NO_FAT
+    if (v->fs == &fs_fat) return v->u.fat.bits == 32;
+#endif
+#ifndef OFS_NO_EXFAT
+    if (v->fs == &fs_exfat) return 1;
+#endif
+    return 0;
 }
 
-int ofs_lookup(struct ofs_vol *v, struct ofs_node *dir, const ofs_u16 *name, unsigned len, struct ofs_dirent *de)
+static const char sf_ext[] = " EA. SF";
+#define SF_EXT  7
+#define SF_EAS  0x40               /* the marks */
+#define SF_CRIT 0x80
+
+static struct ofs_dirent sfe;      /* the EA file's entry */
+static ofs_u16 sfn[255];           /* its name */
+static unsigned sfn_len;
+
+static int is_sf(const ofs_u16 *name, unsigned len)
+{
+    unsigned i;
+    if (len <= SF_EXT) return 0;
+    for (i = 0; i < SF_EXT; ++i) {
+        ofs_u16 c = name[len - SF_EXT + i];
+        if (c >= 'a' && c <= 'z') c -= 32;
+        if (c != (ofs_u8)sf_ext[i]) return 0;
+    }
+    return 1;
+}
+
+/* the EA file's name of name into out */
+static int sf_name(const ofs_u16 *name, unsigned len, ofs_u16 *out, unsigned *olen)
+{
+    unsigned i;
+    if (len + SF_EXT > 255) return OFS_ENAME;
+    memcpy(out, name, len * sizeof(ofs_u16));
+    for (i = 0; i < SF_EXT; ++i) out[len + i] = (ofs_u8)sf_ext[i];
+    *olen = len + SF_EXT;
+    return 0;
+}
+
+static int raw_lookup(struct ofs_vol *v, struct ofs_node *dir, const ofs_u16 *name, unsigned len,
+                      struct ofs_dirent *de)
 {
     ofs_u32 pos = 0;
     int r;
@@ -731,6 +813,21 @@ int ofs_lookup(struct ofs_vol *v, struct ofs_node *dir, const ofs_u16 *name, uns
     while (!(r = v->fs->next(v, dir, &pos, de)))
         if (same(de->name, de->name_len, name, len)) return 0;
     return r == OFS_END ? OFS_ENOENT : r;
+}
+
+int ofs_next(struct ofs_vol *v, struct ofs_node *dir, ofs_u32 *pos, struct ofs_dirent *de)
+{
+    int r, sf = sidecar(v);
+    if (!dir->dir) return OFS_ENOTDIR;
+    do r = v->fs->next(v, dir, pos, de);
+    while (!r && sf && is_sf(de->name, de->name_len));
+    return r;
+}
+
+int ofs_lookup(struct ofs_vol *v, struct ofs_node *dir, const ofs_u16 *name, unsigned len, struct ofs_dirent *de)
+{
+    if (sidecar(v) && is_sf(name, len)) return OFS_ENOENT;
+    return raw_lookup(v, dir, name, len, de);
 }
 
 int ofs_read(struct ofs_vol *v, struct ofs_node *n, ofs_fsize off, void OFS_FAR *buf, ofs_u32 len, ofs_u32 *done)
@@ -808,6 +905,55 @@ int ofs_resize(struct ofs_vol *v, struct ofs_node *n, ofs_fsize size)
     return v->fs->resize(v, n, size);
 }
 
+static int sf_drop(struct ofs_vol *v, struct ofs_node *dir)
+{
+    ofs_u32 p;
+    int r = entry_pos(v, &sfe.node, &p);
+    return r ? r : v->fs->remove(v, dir, p);
+}
+
+/* removes the EA file of name in dir, if there is one */
+static int sf_drop_of(struct ofs_vol *v, struct ofs_node *dir, const ofs_u16 *name, unsigned len)
+{
+    int r;
+    if ((r = sf_name(name, len, sfn, &sfn_len))) return r == OFS_ENAME ? 0 : r;
+    r = raw_lookup(v, dir, sfn, sfn_len, &sfe);
+    if (r) return r == OFS_ENOENT ? 0 : r;
+    return sf_drop(v, dir);
+}
+
+/* 1 when d holds nothing but EA files (left over): they are removed */
+static int sf_only(struct ofs_vol *v, struct ofs_node *d)
+{
+    ofs_u32 p = 0, at;
+    int r;
+    while (!(r = v->fs->next(v, d, &p, &sfe)))
+        if (!is_sf(sfe.name, sfe.name_len)) return 0;
+    if (r != OFS_END) return r;
+    p = 0;
+    while (!(r = v->fs->next(v, d, &p, &sfe)))
+        if ((r = entry_pos(v, &sfe.node, &at)) || (r = v->fs->remove(v, d, at))) return r;
+    return r == OFS_END ? 1 : r;
+}
+
+/* after a rename: the EA file of name in dir becomes to_name's in to */
+static int sf_move(struct ofs_vol *v, struct ofs_node *dir, const ofs_u16 *name, unsigned len,
+                   struct ofs_node *to, const ofs_u16 *to_name, unsigned to_len)
+{
+    static ofs_u16 nn[255];
+    unsigned nl;
+    ofs_u32 p;
+    int r;
+    if ((r = sf_name(to_name, to_len, nn, &nl))) return r;
+    /* one left over under the new name first */
+    if ((r = sf_drop_of(v, to, to_name, to_len))) return r;
+    if ((r = sf_name(name, len, sfn, &sfn_len))) return r;
+    r = raw_lookup(v, dir, sfn, sfn_len, &sfe);
+    if (r) return r == OFS_ENOENT ? 0 : r;
+    if ((r = entry_pos(v, &sfe.node, &p))) return r;
+    return v->fs->rename(v, dir, p, to, nn, nl);
+}
+
 int ofs_create(struct ofs_vol *v, struct ofs_node *dir, const ofs_u16 *name, unsigned len, int is_dir,
                struct ofs_dirent *out)
 {
@@ -816,7 +962,7 @@ int ofs_create(struct ofs_vol *v, struct ofs_node *dir, const ofs_u16 *name, uns
     WRITABLE(v);
     CAN(v, OFS_CAP_CREATE);
     if (!dir->dir) return OFS_ENOTDIR;
-    if (!len || len > 255) return OFS_ENAME;
+    if (!len || len > 255 || (sidecar(v) && is_sf(name, len))) return OFS_ENAME;
     r = ofs_lookup(v, dir, name, len, out);
     if (!r) return OFS_EEXIST;
     if (r != OFS_ENOENT) return r;
@@ -839,8 +985,12 @@ int ofs_remove(struct ofs_vol *v, struct ofs_node *dir, const ofs_u16 *name, uns
     if (de.node.dir) {
         r = v->fs->empty(v, &de.node);
         if (r < 0) return r;
+        if (!r && sidecar(v)) r = sf_only(v, &de.node);
+        if (r < 0) return r;
         if (!r) return OFS_ENOTEMPTY;
     }
+    /* the EAs first: a crash leaves the file without them, not them alone */
+    if (sidecar(v) && de.eas && (r = sf_drop_of(v, dir, de.name, de.name_len))) return r;
     return v->fs->remove(v, dir, pos);
 }
 
@@ -890,13 +1040,15 @@ int ofs_rename(struct ofs_vol *v, struct ofs_node *dir, const ofs_u16 *name, uns
     WRITABLE(v);
     CAN(v, OFS_CAP_CREATE);
     if (!dir->dir || !to->dir) return OFS_ENOTDIR;
-    if (!to_len || to_len > 255) return OFS_ENAME;
+    if (!to_len || to_len > 255 || (sidecar(v) && is_sf(to_name, to_len))) return OFS_ENAME;
     r = ofs_lookup(v, to, to_name, to_len, &de);
     if (!r) return OFS_EEXIST;
     if (r != OFS_ENOENT) return r;
     if ((r = ofs_lookup(v, dir, name, len, &de))) return r;
     if ((r = entry_pos(v, &de.node, &pos))) return r;
-    return v->fs->rename(v, dir, pos, to, to_name, to_len);
+    if (sidecar(v) && de.eas && to_len + SF_EXT > 255) return OFS_ENAME;   /* no name for its EAs */
+    if ((r = v->fs->rename(v, dir, pos, to, to_name, to_len)) || !sidecar(v) || !de.eas) return r;
+    return sf_move(v, dir, de.name, de.name_len, to, to_name, to_len);
 }
 
 int ofs_sync(struct ofs_vol *v)
@@ -907,6 +1059,198 @@ int ofs_sync(struct ofs_vol *v)
 #endif
 
 
+/* FAT32.IFS's EA file (see sidecar above): sfcb its cbList, 4 when the
+   file has none */
+static ofs_u8 sb[512];
+static ofs_u32 sfcb;
+
+static int sf_get(struct ofs_vol *v, ofs_u32 off, void OFS_FAR *buf, ofs_u32 len)
+{
+    ofs_u32 done;
+    int r = ofs_read(v, &sfe.node, off, buf, len, &done);
+    return r ? r : done == len ? 0 : OFS_EBAD;
+}
+
+/* the EA file of de in dir (*found: there is one); its list when de is
+   marked */
+static int sf_open(struct ofs_vol *v, struct ofs_node *dir, const struct ofs_dirent *de, int *found)
+{
+    int r;
+    sfcb = 4;
+    *found = 0;
+    if ((r = sf_name(de->name, de->name_len, sfn, &sfn_len))) return r;
+    r = raw_lookup(v, dir, sfn, sfn_len, &sfe);
+    if (r) return r == OFS_ENOENT ? 0 : r;
+    if (sfe.node.dir) return OFS_EBAD;
+    *found = 1;
+    if (!de->eas) return 0;
+    if ((r = sf_get(v, 0, sb, 4))) return r;
+    sfcb = sb[0] | (ofs_u32)sb[1] << 8 | (ofs_u32)sb[2] << 16 | (ofs_u32)sb[3] << 24;
+    if (sfcb < 4 || sfcb > 0xFFFFUL || sfcb > sfe.node.size) return OFS_EBAD;
+    return 0;
+}
+
+/* the EA at *off: flags, name (sb + 4, NUL-terminated), value length; *off
+   moves past it */
+static int sf_next(struct ofs_vol *v, ofs_u32 *off, unsigned *nl, unsigned *vl)
+{
+    int r;
+    if (*off + 4 > sfcb) return OFS_EBAD;
+    if ((r = sf_get(v, *off, sb, 4))) return r;
+    *nl = sb[1];
+    *vl = sb[2] | sb[3] << 8;
+    if (*off + 5 + *nl + *vl > sfcb) return OFS_EBAD;
+    if ((r = sf_get(v, *off + 4, sb + 4, *nl + 1UL))) return r;
+    if (sb[4 + *nl]) return OFS_EBAD;
+    *off += 5UL + *nl + *vl;
+    return 0;
+}
+
+static int sf_same(const char *a, unsigned n)
+{
+    unsigned i;
+    for (i = 0; i < n; ++i) {
+        unsigned c = (ofs_u8)a[i], d = sb[4 + i];
+        if (c >= 'a' && c <= 'z') c -= 32;
+        if (d >= 'a' && d <= 'z') d -= 32;
+        if (c != d) return 0;
+    }
+    return !a[n];
+}
+
+/* the EA name: its offset and size (0: none) */
+static int sf_find(struct ofs_vol *v, const char *name, ofs_u32 *at, ofs_u32 *size)
+{
+    ofs_u32 off = 4, a;
+    unsigned nl, vl;
+    int r;
+    *size = 0;
+    while (off < sfcb) {
+        a = off;
+        if ((r = sf_next(v, &off, &nl, &vl))) return r;
+        if (sf_same(name, nl)) { *at = a; *size = off - a; return 0; }
+    }
+    return 0;
+}
+
+#ifndef OFS_READONLY
+/* copies len bytes inside the EA file from src down to dst */
+static int sf_copy(struct ofs_vol *v, ofs_u32 dst, ofs_u32 src, ofs_u32 len)
+{
+    ofs_u32 n;
+    int r;
+    while (len) {
+        n = len > sizeof(sb) ? sizeof(sb) : len;
+        if ((r = sf_get(v, src, sb, n)) || (r = ofs_write(v, &sfe.node, dst, sb, n))) return r;
+        src += n; dst += n; len -= n;
+    }
+    return 0;
+}
+
+/* Changes the list in place (as FAT32.IFS does; a crash in between can
+   leave a damaged list, OFS_EBAD until the file's EAs are removed); the
+   mark is set last when the file is new and cleared first when the last
+   EA goes, so the EA file never belongs to a file it does not know of. */
+static int sf_set(struct ofs_vol *v, struct ofs_node *dir, const struct ofs_dirent *de, ofs_u32 pos,
+                  const char *name, const void OFS_FAR *val, ofs_u16 vlen, int how)
+{
+    ofs_u32 at = 0, sz = 0, ncb, end, off;
+    unsigned nl = (unsigned)strlen(name), enl, evl;
+    ofs_u8 mark = SF_EAS;
+    int found, r;
+    if (!nl || nl > 255) return OFS_ENAME;
+    if ((r = sf_open(v, dir, de, &found))) return r;
+    if (de->eas && found && (r = sf_find(v, name, &at, &sz))) return r;
+    if (how == OFS_EA_CREATE && sz) return OFS_EEXIST;
+    if ((how == OFS_EA_REPLACE || how == OFS_EA_REMOVE) && !sz) return OFS_ENOATTR;
+    ncb = sfcb - sz + (how == OFS_EA_REMOVE ? 0 : 5UL + nl + vlen);
+    if (ncb > 0xFFFFUL) return OFS_EFULL;
+    if (ncb == 4) {
+        if (de->eas && (r = v->fs->eamark(v, dir, pos, 0))) return r;
+        return found ? sf_drop(v, dir) : 0;
+    }
+    if (!found) {
+        ofs_u32 p;
+        if ((r = v->fs->create(v, dir, sfn, sfn_len, 0, &p))) return r;
+        if ((r = v->fs->next(v, dir, &p, &sfe))) return r == OFS_END ? OFS_EBAD : r;
+    }
+    end = sfcb;
+    if (sz) {
+        if ((r = sf_copy(v, at, at + sz, end - at - sz))) return r;
+        end -= sz;
+    }
+    if (how != OFS_EA_REMOVE) {
+        sb[0] = 0;
+        sb[1] = (ofs_u8)nl;
+        sb[2] = (ofs_u8)vlen;
+        sb[3] = (ofs_u8)(vlen >> 8);
+        memcpy(sb + 4, name, nl + 1);
+        if ((r = ofs_write(v, &sfe.node, end, sb, 5UL + nl))) return r;
+        if (vlen && (r = ofs_write(v, &sfe.node, end + 5 + nl, val, vlen))) return r;
+        end += 5UL + nl + vlen;
+    }
+    sb[0] = (ofs_u8)ncb; sb[1] = (ofs_u8)(ncb >> 8); sb[2] = sb[3] = 0;
+    if ((r = ofs_write(v, &sfe.node, 0, sb, 4))) return r;
+    if (sfe.node.size > ncb && (r = ofs_resize(v, &sfe.node, ncb))) return r;
+    sfcb = ncb;
+    if (!found) {
+        ofs_u32 p;
+        if ((r = entry_pos(v, &sfe.node, &p))) return r;
+        sfe.node.attr = sfe.attr;
+        if ((r = v->fs->setattr(v, dir, p, &sfe.node, OFS_ATTR_HIDDEN | OFS_ATTR_SYSTEM | OFS_ATTR_RDONLY)))
+            return r;
+    }
+    /* critical: one of them flagged "need" */
+    for (off = 4; off < sfcb;) {
+        if ((r = sf_next(v, &off, &enl, &evl))) return r;
+        if (sb[0] & 0x80) mark = SF_CRIT;
+    }
+    return de->eas == mark ? 0 : v->fs->eamark(v, dir, pos, mark);
+}
+#endif
+
+static int sf_ea(struct ofs_vol *v, struct ofs_node *dir, const struct ofs_dirent *de, ofs_u32 pos, int op,
+                 const char *name, void OFS_FAR *buf, ofs_u16 size, ofs_u16 *len)
+{
+    ofs_u32 at, sz, off, total = 0;
+    unsigned nl, vl;
+    int found, r;
+    if (op == EA_GET || op == EA_LIST) {
+        if (!de->eas) return op == EA_GET ? OFS_ENOATTR : 0;
+        if ((r = sf_open(v, dir, de, &found))) return r;
+        if (!found) return op == EA_GET ? OFS_ENOATTR : 0;
+    }
+    if (op == EA_GET) {
+        if ((r = sf_find(v, name, &at, &sz))) return r;
+        if (!sz) return OFS_ENOATTR;
+        if ((r = sf_get(v, at, sb, 4))) return r;
+        *len = (ofs_u16)(sb[2] | sb[3] << 8);
+        if (!size) return 0;
+        if (*len > size) return OFS_ERANGE;
+        return sf_get(v, at + 5 + sb[1], buf, *len);
+    }
+    if (op == EA_LIST) {
+        for (off = 4; off < sfcb;) {
+            if ((r = sf_next(v, &off, &nl, &vl))) return r;
+            if (size) {
+                unsigned i;
+                if (total + nl + 1 > size) return OFS_ERANGE;
+                for (i = 0; i <= nl; ++i) ((char OFS_FAR *)buf)[total + i] = (char)sb[4 + i];
+            }
+            total += nl + 1;
+            if (total > 0xFFFFUL) return OFS_ERANGE;
+        }
+        *len = (ofs_u16)total;
+        return 0;
+    }
+#ifdef OFS_READONLY
+    (void)pos;
+    return OFS_EROFS;
+#else
+    return sf_set(v, dir, de, pos, name, buf, size, op);
+#endif
+}
+
 /* the entry of name in dir for its extended attributes */
 static int ea_call(struct ofs_vol *v, struct ofs_node *dir, const ofs_u16 *name, unsigned len, int op,
                    const char *ea, void OFS_FAR *buf, ofs_u16 size, ofs_u16 *out)
@@ -915,8 +1259,9 @@ static int ea_call(struct ofs_vol *v, struct ofs_node *dir, const ofs_u16 *name,
     ofs_u32 pos;
     int r;
     *out = 0;
-    if (!v->fs->ea) return OFS_ENOTSUP;
+    if (!v->fs->ea && !sidecar(v)) return OFS_ENOTSUP;
     if ((r = ofs_lookup(v, dir, name, len, &de)) || (r = entry_pos(v, &de.node, &pos))) return r;
+    if (sidecar(v)) return sf_ea(v, dir, &de, pos, op, ea, buf, size, out);
     return v->fs->ea(v, dir, pos, op, ea, buf, size, out);
 }
 

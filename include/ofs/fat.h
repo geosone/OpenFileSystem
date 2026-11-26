@@ -89,6 +89,8 @@ struct ofs_fat_ent {
     ofs_u8 attr, ntcase;       /* ntcase: 08h base, 10h extension lower case */
     ofs_u16 ea;                /* FAT12/16: the OS/2 and NT extended attributes'
                                    handle (offset 14h), 0: none */
+    ofs_u8 eas;                /* FAT32: FAT32.IFS's mark in byte 0Ch, 40h EAs in
+                                   "name EA. SF", 80h critical ones; 0: none */
     ofs_u16 time, date;        /* last written */
     ofs_u16 ctime, cdate, adate;
     ofs_u8 ctime_cs;           /* 10 ms units of ctime */
@@ -158,6 +160,11 @@ int ofs_fat_create_fcb(struct ofs_fat *, struct ofs_fat_file *dir, const char fc
                         ofs_u16 time, ofs_u16 date, ofs_u32 *pos);
 /* FAT12/16: the extended attributes' handle of the entry at pos. */
 int ofs_fat_set_ea(struct ofs_fat *, struct ofs_fat_file *dir, ofs_u32 pos, ofs_u16 handle);
+/* FAT32: the EA mark of the entry at pos (OFS_FAT_EAS, _CRITICAL or 0); the
+   NT case bits stay. */
+#define OFS_FAT_EAS          0x40
+#define OFS_FAT_EAS_CRITICAL 0x80
+int ofs_fat_eamark(struct ofs_fat *, struct ofs_fat_file *dir, ofs_u32 pos, ofs_u8 mark);
 
 /* OS/2's and Windows NT's extended attributes on FAT12/16 (src/fat/fat_ea.c):
    one hidden file "EA DATA. SF" in the root directory holds every file's

@@ -224,6 +224,7 @@ int ofs_exfat_dir_next(struct ofs_exfat *v, struct ofs_exfat_file *d, ofs_u32 *p
         if (n < 2 || n > 18) continue;
         ent->pos = *pos;
         ent->attr = rd16(e+4);
+        ent->eas = e[6];
         ent->time = rd16(e+12); ent->date = rd16(e+14);
         want = rd16(e+2);
         sum = checksum(0, e, 1);
@@ -1103,6 +1104,16 @@ int ofs_exfat_attr(struct ofs_exfat *v, struct ofs_exfat_file *dir, ofs_u32 pos,
     if ((r = get_set(v, dir, pos, &n)) != 0) return r;
     if ((r = begin(v)) != 0) return r;
     wr16(fe+4, (ofs_u16)((attr & ~OFS_EXFAT_DIR) | (rd16(fe+4) & OFS_EXFAT_DIR)));
+    return put_set(v, dir, pos);
+}
+
+int ofs_exfat_eamark(struct ofs_exfat *v, struct ofs_exfat_file *dir, ofs_u32 pos, ofs_u8 mark)
+{
+    unsigned n;
+    int r;
+    if ((r = get_set(v, dir, pos, &n)) != 0) return r;
+    if ((r = begin(v)) != 0) return r;
+    fe[6] = mark;
     return put_set(v, dir, pos);
 }
 
