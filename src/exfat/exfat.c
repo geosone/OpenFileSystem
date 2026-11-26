@@ -226,6 +226,8 @@ int ofs_exfat_dir_next(struct ofs_exfat *v, struct ofs_exfat_file *d, ofs_u32 *p
         ent->attr = rd16(e+4);
         ent->eas = e[6];
         ent->time = rd16(e+12); ent->date = rd16(e+14);
+        ent->ctime = rd16(e+8); ent->cdate = rd16(e+10); ent->ctime_cs = e[20];
+        ent->atime = rd16(e+16); ent->adate = rd16(e+18);
         want = rd16(e+2);
         sum = checksum(0, e, 1);
         ent->name_len = 0; names = 0;

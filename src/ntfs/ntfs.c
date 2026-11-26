@@ -645,9 +645,15 @@ static int stat_rec(struct ofs_ntfs *v, ofs_u32 no, struct ofs_ntfs_ent *e)
     memset(f, 0, sizeof(*f));
     f->first = no;
     if ((rc = load_rec(v, no, v->rec2, &v->rec2_no))) return rc;
-    e->attr = 0; e->time = 0; e->date = 1 << 5 | 1;
+    e->attr = 0; e->time = e->ctime = e->atime = 0; e->date = e->cdate = e->adate = 1 << 5 | 1;
+    e->ctime_cs = 0;
     if ((a = find_attr(v, v->rec2, AT_STD, 0)) && (val = res_value(a, &len)) && len >= 36) {
         dos_time(val + 8, v->tz, &e->time, &e->date);
+        dos_time(val, v->tz, &e->ctime, &e->cdate);
+        dos_time(val + 24, v->tz, &e->atime, &e->adate);
+        /* past the 2 s of the DOS form (whole seconds from 1601 and the
+           time zone's minutes are even) */
+        e->ctime_cs = (ofs_u8)(((ofs_u64)rd32(val + 4) << 32 | rd32(val)) / 100000UL % 200);
         e->attr = (ofs_u16)(rd32(val + 32) & (OFS_NTFS_RDONLY | OFS_NTFS_HIDDEN | OFS_NTFS_SYSTEM | OFS_NTFS_ARCH));
     }
     if (rd16(v->rec2 + 0x16) & 2) {             /* a directory */

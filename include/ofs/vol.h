@@ -144,6 +144,10 @@ struct ofs_dirent {
     ofs_u8 attr;
     ofs_u8 eas;                   /* FAT32, exFAT: FAT32.IFS's EA mark (40h, 80h) */
     ofs_u16 time, date;           /* last written, local DOS form */
+    ofs_u16 ctime, cdate;         /* created (FAT, exFAT, NTFS), ctime_cs its 10 ms units */
+    ofs_u8 ctime_cs;
+    ofs_u16 atime, adate;         /* last accessed (FAT: the date only, atime 0) */
+                                  /* a date 0: not kept (ISO 9660, UDF) */
     struct ofs_node node;
 };
 

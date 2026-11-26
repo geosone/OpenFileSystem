@@ -110,6 +110,10 @@ for v in 4096:512 512:512 4096:4096; do
     # times and the read-only attribute (utimens, chmod)
     touch -m -d '2001-02-03 04:05:06.25' "$m/NEU.TXT" || fail "touch -d"
     touch -a -d '2002-03-04 05:06:07' "$m/NEU.TXT" || fail "touch -a -d"
+    # read back through ofsfuse too (OpenFileSystem's dirent: the last access)
+    test "$(stat -c %X "$m/NEU.TXT")" = "$(date -d '2002-03-04 05:06:06' +%s)" ||
+        test "$(stat -c %X "$m/NEU.TXT")" = "$(date -d '2002-03-04 05:06:07' +%s)" ||
+        fail "NEU.TXT's access time through ofsfuse: $(stat -c %x "$m/NEU.TXT")"
     chmod a-w "$m/a/b/c/Tiefe Datei.txt" || fail "chmod a-w"
     # extended attributes
     python3 -I - "$m" <<'PY' || fail "extended attributes"

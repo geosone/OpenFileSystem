@@ -114,6 +114,8 @@ struct ofs_exfat_where {
 struct ofs_exfat_ent {
     ofs_u32 pos;                 /* byte offset of the file entry */
     ofs_u16 attr, time, date;
+    ofs_u16 ctime, cdate, atime, adate;   /* created, last accessed */
+    ofs_u8 ctime_cs;             /* 10 ms units of ctime */
     ofs_u8 eas;                  /* FAT32.IFS's EA mark (byte 6 of the file entry):
                                     40h EAs in "name EA. SF", 80h critical ones */
     struct ofs_exfat_file file;

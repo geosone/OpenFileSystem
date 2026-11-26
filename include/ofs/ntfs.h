@@ -120,6 +120,8 @@ struct ofs_ntfs_file {
 struct ofs_ntfs_ent {
     ofs_u32 pos;                 /* where the entry is (see dir_next) */
     ofs_u16 attr, time, date;
+    ofs_u16 ctime, cdate, atime, adate;   /* created, last accessed ($STANDARD_INFORMATION) */
+    ofs_u8 ctime_cs;             /* 10 ms units of ctime */
     ofs_u8 ns;                   /* name space: 0 POSIX, 1 Win32, 2 DOS, 3 both */
     struct ofs_ntfs_file file;
     ofs_u8 name_len;

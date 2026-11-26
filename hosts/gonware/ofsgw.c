@@ -192,6 +192,11 @@ static int readdir(struct fs_node *dir, uint32_t *pos, struct fs_dirent *de)
 	de->size = ent.node.size;
 	de->time = ent.time;
 	de->date = ent.date;
+	de->ctime = ent.ctime;
+	de->cdate = ent.cdate;
+	de->ccs10 = ent.ctime_cs;
+	de->atime = ent.atime;
+	de->adate = ent.adate;
 	return FS_OK;
 }
 

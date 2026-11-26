@@ -196,8 +196,12 @@ static time_t dostime(ofs_u16 t, ofs_u16 d)
     return mktime(&tm);
 }
 
-static void fill(struct stat *st, const struct ofs_node *n, ofs_u16 t, ofs_u16 d)
+/* st_atime the last access where the file system keeps it; st_ctime
+   stays the modification time (as Linux's exfat; a creation time is no
+   status change time) */
+static void fill(struct stat *st, const struct ofs_dirent *de)
 {
+    const struct ofs_node *n = &de->node;
     memset(st, 0, sizeof(*st));
     st->st_mode = n->dir ? S_IFDIR | 0755 : S_IFREG | ((n->attr & OFS_ATTR_RDONLY) ? 0444 : 0644);
     if (!(vol.caps & OFS_CAP_WRITE)) st->st_mode &= ~0222u;
@@ -206,7 +210,8 @@ static void fill(struct stat *st, const struct ofs_node *n, ofs_u16 t, ofs_u16 d
     st->st_blocks = (blkcnt_t)((n->size + 511) / 512);
     st->st_uid = getuid();
     st->st_gid = getgid();
-    st->st_mtime = st->st_ctime = st->st_atime = dostime(t, d);
+    st->st_mtime = st->st_ctime = st->st_atime = dostime(de->time, de->date);
+    if (de->adate) st->st_atime = dostime(de->atime, de->adate);
 }
 
 /* the entry of a path, with its times (the root has none) */
@@ -253,7 +258,7 @@ static int op_getattr(const char *path, struct stat *st, struct fuse_file_info *
     int r;
     (void)fi;
     if ((r = entry(path, &de))) return r;
-    fill(st, &de.node, de.time, de.date);
+    fill(st, &de);
     return 0;
 }
 
@@ -273,7 +278,7 @@ static int op_readdir(const char *path, void *buf, fuse_fill_dir_t filler, off_t
     filler(buf, "..", NULL, 0, 0);
     while (!(r = ofs_next(&vol, &dir, &pos, &de))) {
         to8(de.name, de.name_len, name);
-        fill(&st, &de.node, de.time, de.date);
+        fill(&st, &de);
         if (filler(buf, name, &st, 0, 0)) break;
     }
     return r == OFS_END || r == 0 ? 0 : err(r);

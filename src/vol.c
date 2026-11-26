@@ -118,6 +118,8 @@ static void fat_ent(struct ofs_vol *v, struct ofs_node *dir, const struct ofs_fa
     de->eas = e->eas;
     de->time = e->time;
     de->date = e->date;
+    de->ctime = e->ctime; de->cdate = e->cdate; de->ctime_cs = e->ctime_cs;
+    de->atime = 0; de->adate = e->adate;
     n->dir = (e->attr & OFS_FAT_DIR) != 0;
     n->size = e->file.size;
     if (n->dir) ofs_fat_dirfile(&v->u.fat, e->file.first, &n->u.fat.f);
@@ -289,6 +291,8 @@ static int ex_next(struct ofs_vol *v, struct ofs_node *dir, ofs_u32 *pos, struct
     de->eas = xent.eas;
     de->time = xent.time;
     de->date = xent.date;
+    de->ctime = xent.ctime; de->cdate = xent.cdate; de->ctime_cs = xent.ctime_cs;
+    de->atime = xent.atime; de->adate = xent.adate;
     n->dir = (xent.attr & OFS_EXFAT_DIR) != 0;
     n->size = xent.file.size;
     n->u.ex.f = xent.file;
@@ -421,6 +425,8 @@ static void nt_ent(struct ofs_dirent *de)
     de->attr = n->attr = (ofs_u8)nent.attr;
     de->time = nent.time;
     de->date = nent.date;
+    de->ctime = nent.ctime; de->cdate = nent.cdate; de->ctime_cs = nent.ctime_cs;
+    de->atime = nent.atime; de->adate = nent.adate;
     n->dir = (nent.attr & OFS_NTFS_DIR) != 0;
     n->size = nent.file.size;
     n->u.ntfs = nent.file;
@@ -595,6 +601,7 @@ static int iso_next(struct ofs_vol *v, struct ofs_node *dir, ofs_u32 *pos, struc
     de->attr = n->attr = ient.attr;
     de->time = ient.time;
     de->date = ient.date;
+    de->ctime = de->cdate = de->atime = de->adate = 0; de->ctime_cs = 0;
     n->dir = ient.file.dir;
     n->size = ient.file.size;
     n->u.iso = ient.file;
@@ -659,6 +666,7 @@ static int udf_next(struct ofs_vol *v, struct ofs_node *dir, ofs_u32 *pos, struc
     de->attr = n->attr = uent.attr;
     de->time = uent.time;
     de->date = uent.date;
+    de->ctime = de->cdate = de->atime = de->adate = 0; de->ctime_cs = 0;
     n->dir = uent.file.dir;
     n->size = uent.file.size;
     n->u.udf = uent.file;
