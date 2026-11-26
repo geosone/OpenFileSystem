@@ -16,8 +16,14 @@
 # into a compressed file. Then ntfsfix finds the volume clean, tests/ntfs_check.py
 # finds every cluster accounted for in $Bitmap and none used twice, ntfs-3g
 # reads every file as expected, and a written file has a new time (the
-# others keep theirs). A volume with a hibernated Windows on it (hiberfil.sys
-# starting with "hibr") is mounted read-only.
+# others keep theirs). Extended attributes (Windows NT's $EA): set, read,
+# listed, replaced, removed through ofsfuse as user.* xattrs, on files and
+# a directory, next to one ntfs-3g wrote (system.ntfs_ea), too large ones
+# refused (ENOSPC: not in the MFT record, not yet); then
+# tests/ntfs_ea_check.py reads them with ntfscat ($EA, $EA_INFORMATION,
+# the packed size in every $FILE_NAME) and ntfs-3g reads them back. A
+# volume with a hibernated Windows on it (hiberfil.sys starting with
+# "hibr") is mounted read-only.
 set -eu
 cd "$(dirname "$0")/.."
 F=${OFSFUSE:-build/host/ofsfuse}
@@ -53,6 +59,9 @@ for v in 4096:512 512:512 4096:4096; do
     printf A > "$m/loch.dat"
     printf B | dd of="$m/loch.dat" bs=1 seek=1048576 conv=notrunc status=none
     cp "$m/loch.dat" "$d/expect/loch.dat"
+    # an EA as ntfs-3g writes it (the raw $EA): VON3G = "ja" on SUB/A.B
+    python3 -I -c 'import os, struct, sys; n, v = b"VON3G", b"ja"; e = struct.pack("<IBBH", (8 + len(n) + 1 + len(v) + 3) & ~3, 0, len(n), len(v)) + n + b"\0" + v; e += bytes(-len(e) % 4); os.setxattr(sys.argv[1], "system.ntfs_ea", e)' "$m/SUB/A.B" ||
+        fail "ntfs-3g does not take an EA"
     t_gross=$(stat -c %Y "$m/gross.bin"); t_klein=$(stat -c %Y "$m/SUB/A.B")
     umnt
     sleep 2
@@ -102,6 +111,39 @@ for v in 4096:512 512:512 4096:4096; do
     touch -m -d '2001-02-03 04:05:06.25' "$m/NEU.TXT" || fail "touch -d"
     touch -a -d '2002-03-04 05:06:07' "$m/NEU.TXT" || fail "touch -a -d"
     chmod a-w "$m/a/b/c/Tiefe Datei.txt" || fail "chmod a-w"
+    # extended attributes
+    python3 -I - "$m" <<'PY' || fail "extended attributes"
+import errno, os, sys
+m = sys.argv[1]
+def err(f, *a):
+    try:
+        f(*a)
+    except OSError as e:
+        return e.errno
+    return 0
+a, d, u = os.path.join(m, 'NEU.TXT'), os.path.join(m, 'Neuer Ordner'), os.path.join(m, 'Ärger über Öl.txt')
+b = os.path.join(m, 'SUB', 'A.B')
+assert os.listxattr(a) == []
+os.setxattr(a, 'user.Kommentar', b'Hallo, NT')
+os.setxattr(a, 'user.bin', bytes([0, 255, 1, 2, 3]))
+os.setxattr(d, 'user.ordner', b'ja')
+os.setxattr(u, 'user.x', b'1')
+assert os.getxattr(a, 'user.KOMMENTAR') == b'Hallo, NT', 'names without case'
+assert sorted(os.listxattr(a)) == ['user.Kommentar', 'user.bin']
+assert os.getxattr(b, 'user.VON3G') == b'ja', "ntfs-3g's EA"
+os.setxattr(b, 'user.zwei', b'2' * 100)
+assert sorted(os.listxattr(b)) == ['user.VON3G', 'user.zwei']
+assert err(os.setxattr, a, 'user.bin', b'x', os.XATTR_CREATE) == errno.EEXIST
+assert err(os.setxattr, a, 'user.neu', b'x', os.XATTR_REPLACE) == errno.ENODATA
+assert err(os.getxattr, a, 'user.fehlt') == errno.ENODATA
+assert err(os.setxattr, a, 'user.gross', bytes(5000)) == errno.ENOSPC, 'not in the record'
+assert sorted(os.listxattr(a)) == ['user.Kommentar', 'user.bin'], 'a refused one changes nothing'
+os.setxattr(a, 'user.Kommentar', b'Ein laengerer Kommentar' * 4, os.XATTR_REPLACE)
+os.removexattr(a, 'user.bin')
+os.setxattr(u, 'user.x', b'')
+os.removexattr(u, 'user.x')
+assert os.listxattr(u) == []
+PY
     refused "a name there in other case" mkdir "$m/neu.txt"
     refused "a name Win32 does not allow" touch "$m/a:b"
     refused "removing" rm "$m/klein.txt"
@@ -113,7 +155,14 @@ for v in 4096:512 512:512 4096:4096; do
     umnt
     ntfsfix -n "$d/ntfs.img" >/dev/null || fail "ntfsfix finds the volume damaged"
     python3 -I tests/ntfs_check.py "$d/ntfs.img" >"$d/check.txt" || { cat "$d/check.txt"; fail "clusters"; }
+    for e in "/NEU.TXT|Kommentar=92" "/Neuer Ordner|ordner=2" "/SUB/A.B|VON3G=2 zwei=100" "/Ärger über Öl.txt|" "/README.TXT|"; do
+        f=${e%%|*} w=${e#*|}
+        # shellcheck disable=SC2086
+        python3 -I tests/ntfs_ea_check.py "$d/ntfs.img" "$f" $w >"$d/ea.txt" || { cat "$d/ea.txt"; fail "the EAs of $f"; }
+    done
     ntfs-3g -o ro "$d/ntfs.img" "$m"
+    python3 -I -c 'import os, sys; r = os.getxattr(sys.argv[1], "system.ntfs_ea"); assert b"KOMMENTAR" in r.upper() and b"Ein laengerer Kommentar" in r, r' "$m/NEU.TXT" ||
+        fail "ntfs-3g does not read the EA"
     diff -r "$m" "$d/expect" >/dev/null || { diff -rq "$m" "$d/expect" | head -5; fail "contents differ"; }
     test "$(stat -c %Y "$m/gross.bin")" -gt "$t_gross" || fail "gross.bin has no new time"
     dt=$(( $(date +%s) - $(stat -c %Y "$m/gross.bin") ))

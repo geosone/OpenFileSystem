@@ -39,6 +39,8 @@
 #define OFS_NTFS_EFULL  -10      /* no free cluster */
 #define OFS_NTFS_EEXIST -11      /* the name exists (case-insensitively) */
 #define OFS_NTFS_ENAME  -12      /* not a valid Win32 name */
+#define OFS_NTFS_ENOATTR -26     /* no such extended attribute (as vol.h's) */
+#define OFS_NTFS_ERANGE -27      /* a buffer too small for it */
 
 /* attributes as DOS has them */
 #define OFS_NTFS_RDONLY 0x01
@@ -147,6 +149,13 @@ int ofs_ntfs_free(struct ofs_ntfs *, ofs_u32 *free_clusters);
    ("~n" for the n-th long name with the same basis). */
 int ofs_ntfs_short(struct ofs_ntfs *, struct ofs_ntfs_file *dir, const struct ofs_ntfs_ent *, char fcb[11]);
 int ofs_ntfs_lookup(struct ofs_ntfs *, struct ofs_ntfs_file *dir, const char fcb[11], struct ofs_ntfs_ent *);
+/* Windows NT's extended attributes of f ($EA_INFORMATION, $EA): names
+   1-255 bytes, compared without case, kept as given; at most 65535 bytes
+   packed.  The value's length in *len, the value into buf unless size is
+   0; ofs_ntfs_ea_list: the names, each with a NUL. */
+int ofs_ntfs_ea_get(struct ofs_ntfs *, struct ofs_ntfs_file *f, const char *name, void OFS_FAR *buf,
+                    ofs_u16 size, ofs_u16 *len);
+int ofs_ntfs_ea_list(struct ofs_ntfs *, struct ofs_ntfs_file *f, char OFS_FAR *buf, ofs_u16 size, ofs_u16 *len);
 #ifndef OFS_READONLY
 /* Writing, stage 1: data overwritten where it is (no allocation, no size
    change).  ofs_ntfs_set_write allows it when the volume is NTFS 3.x,
@@ -187,5 +196,17 @@ int ofs_ntfs_set_attr(struct ofs_ntfs *, struct ofs_ntfs_file *, ofs_u8 attr);
    smaller than 2 KB. */
 int ofs_ntfs_create(struct ofs_ntfs *, struct ofs_ntfs_file *dir, const ofs_u16 *name, unsigned len, int is_dir,
                     ofs_u16 time, ofs_u16 date, ofs_u32 *pos);
+/* An extended attribute set (how: OFS_NTFS_EA_SET, _CREATE: EEXIST when it
+   is there, _REPLACE: ENOATTR when not, _REMOVE: ENOATTR when not), in
+   f's base record, resident as Windows keeps small ones; the record
+   changed time (time, date) set.  OFS_NTFS_ENOSPACE (not yet): they do
+   not fit in the record, or $EA is non-resident or in an extension
+   record; OFS_NTFS_EFULL: more than 65535 bytes packed. */
+#define OFS_NTFS_EA_SET     0
+#define OFS_NTFS_EA_CREATE  1
+#define OFS_NTFS_EA_REPLACE 2
+#define OFS_NTFS_EA_REMOVE  3
+int ofs_ntfs_ea_set(struct ofs_ntfs *, struct ofs_ntfs_file *f, const char *name, const void OFS_FAR *val,
+                    ofs_u16 vlen, int how, ofs_u16 time, ofs_u16 date);
 #endif
 #endif

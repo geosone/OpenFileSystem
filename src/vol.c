@@ -33,9 +33,9 @@ struct ofs_fs {
     int (*settime)(struct ofs_vol *, struct ofs_node *dir, ofs_u32 pos, struct ofs_node *n, unsigned which,
                    ofs_u16 time, ofs_u16 date, ofs_u8 cs10);
 #endif
-    /* extended attributes of the entry at pos in dir: OFS_EA_* or EA_GET,
-       EA_LIST; NULL: none */
-    int (*ea)(struct ofs_vol *, struct ofs_node *dir, ofs_u32 pos, int op, const char *name,
+    /* extended attributes of the entry at pos in dir, which is n: OFS_EA_*
+       or EA_GET, EA_LIST; NULL: none */
+    int (*ea)(struct ofs_vol *, struct ofs_node *dir, ofs_u32 pos, struct ofs_node *n, int op, const char *name,
               void OFS_FAR *buf, ofs_u16 size, ofs_u16 *len);
 #ifndef OFS_READONLY
     /* FAT32.IFS's EA mark of the entry at pos (FAT32, exFAT); NULL: none */
@@ -219,14 +219,15 @@ static int fat_eamark(struct ofs_vol *v, struct ofs_node *dir, ofs_u32 pos, ofs_
 }
 #endif
 
-static int fat_ea(struct ofs_vol *v, struct ofs_node *dir, ofs_u32 pos, int op, const char *name,
-                  void OFS_FAR *buf, ofs_u16 size, ofs_u16 *len)
+static int fat_ea(struct ofs_vol *v, struct ofs_node *dir, ofs_u32 pos, struct ofs_node *n, int op,
+                  const char *name, void OFS_FAR *buf, ofs_u16 size, ofs_u16 *len)
 {
     static struct ofs_fat_ent e;
 #ifndef OFS_READONLY
     ofs_u16 t, d;
 #endif
     int r = ofs_fat_entry_at(&v->u.fat, &dir->u.fat.f, pos, &e);
+    (void)n;
     if (r) return r;
     if (op == EA_GET) return ofs_fat_ea_get(&v->u.fat, &e, name, buf, size, len);
     if (op == EA_LIST) return ofs_fat_ea_list(&v->u.fat, &e, (char OFS_FAR *)buf, size, len);
@@ -513,6 +514,31 @@ static int nt_setattr(struct ofs_vol *v, struct ofs_node *dir, ofs_u32 pos, stru
     return nt_err(ofs_ntfs_set_attr(&v->u.ntfs, &n->u.ntfs, attr));
 }
 
+#endif
+
+static int nt_ea(struct ofs_vol *v, struct ofs_node *dir, ofs_u32 pos, struct ofs_node *n, int op,
+                 const char *name, void OFS_FAR *buf, ofs_u16 size, ofs_u16 *len)
+{
+    int r;
+#ifndef OFS_READONLY
+    ofs_u16 t = 0, d = 0;
+#endif
+    (void)dir; (void)pos;
+    if (op == EA_GET) r = ofs_ntfs_ea_get(&v->u.ntfs, &n->u.ntfs, name, buf, size, len);
+    else if (op == EA_LIST) r = ofs_ntfs_ea_list(&v->u.ntfs, &n->u.ntfs, (char OFS_FAR *)buf, size, len);
+    else {
+#ifdef OFS_READONLY
+        return OFS_EROFS;
+#else
+        if (v->host.now) v->host.now(v->dev, &t, &d);
+        r = ofs_ntfs_ea_set(&v->u.ntfs, &n->u.ntfs, name, buf, size, op, t, d);
+        if (r == OFS_NTFS_ENOSPACE) return OFS_EFULL;   /* not in the record: not yet */
+#endif
+    }
+    return nt_err(r);
+}
+
+#ifndef OFS_READONLY
 static int nt_settime(struct ofs_vol *v, struct ofs_node *dir, ofs_u32 pos, struct ofs_node *n, unsigned which,
                       ofs_u16 time, ofs_u16 date, ofs_u8 cs10)
 {
@@ -533,7 +559,7 @@ static const struct ofs_fs fs_ntfs = {
 #endif
     nt_setattr, nt_settime
 #endif
-    , NULL
+    , nt_ea
 #ifndef OFS_READONLY
     , NULL
 #endif
@@ -1260,9 +1286,14 @@ static int ea_call(struct ofs_vol *v, struct ofs_node *dir, const ofs_u16 *name,
     int r;
     *out = 0;
     if (!v->fs->ea && !sidecar(v)) return OFS_ENOTSUP;
-    if ((r = ofs_lookup(v, dir, name, len, &de)) || (r = entry_pos(v, &de.node, &pos))) return r;
+    if ((r = ofs_lookup(v, dir, name, len, &de))) return r;
+#ifndef OFS_NO_NTFS
+    if (v->fs == &fs_ntfs) pos = 0;               /* NTFS takes the file itself */
+    else
+#endif
+    if ((r = entry_pos(v, &de.node, &pos))) return r;
     if (sidecar(v)) return sf_ea(v, dir, &de, pos, op, ea, buf, size, out);
-    return v->fs->ea(v, dir, pos, op, ea, buf, size, out);
+    return v->fs->ea(v, dir, pos, &de.node, op, ea, buf, size, out);
 }
 
 int ofs_getea(struct ofs_vol *v, struct ofs_node *dir, const ofs_u16 *name, unsigned len, const char *ea,

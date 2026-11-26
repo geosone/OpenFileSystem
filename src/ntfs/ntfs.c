@@ -26,6 +26,8 @@
 #define AT_IROOT    0x90
 #define AT_IALLOC   0xA0
 #define AT_BITMAP   0xB0
+#define AT_EAINFO   0xD0
+#define AT_EA       0xE0
 #define AT_END      0xFFFFFFFFUL
 
 #define F_DIR       0x10000000UL        /* $FILE_NAME flags: a directory */
@@ -1018,6 +1020,130 @@ int ofs_ntfs_free(struct ofs_ntfs *v, ofs_u32 *free_clusters)
     return OFS_NTFS_OK;
 }
 
+/* ---- extended attributes ----
+   As Windows NT keeps them (ntfs-3g's and Linux ntfs3's description of
+   the layout; own code): $EA_INFORMATION (resident, 8 bytes: the packed
+   size -- 4 + name + NUL + value per EA, as OS/2's FEA --, the count of
+   EAs flagged "need" (80h), the unpacked size, i.e. $EA's) and $EA, the
+   EAs one after the other: the offset to the next (also in the last, 0
+   read as "the rest"), flags, name length, value length (word), the name,
+   a NUL, the value, each on a multiple of 4.  The unpacked size is
+   repeated in the $FILE_NAMEs and the index entries (offset 3Ch, not for
+   a reparse point: as ntfs-3g and ntfs3 write it, though ntfs-3g's
+   layout.h calls the field packed_ea_size). */
+static ofs_u8 eab[512];            /* a block of a non-resident $EA */
+static const ofs_u8 *ea_a;         /* the $EA attribute, in rec2 */
+static ofs_u32 ea_len;             /* its value's length */
+static ofs_u8 eah[8 + 256];        /* an EA's header and name */
+
+/* the $EA of record no (in rec2): ea_a, ea_len; ea_len 0: none */
+static int ea_open(struct ofs_ntfs *v, ofs_u32 no)
+{
+    int rc = ext_attr(v, no, AT_EA, 0, 0, v->rec2, &v->rec2_no, &ea_a);
+    ea_len = 0;
+    if (rc) return rc == OFS_NTFS_END ? OFS_NTFS_OK : rc;
+    if (!ea_a[8]) return res_value(ea_a, &ea_len) ? OFS_NTFS_OK : OFS_NTFS_EBAD;
+    if (rd32(ea_a + 0x34) || rd32(ea_a + 0x30) > 0x40000UL) return OFS_NTFS_EBAD;
+    ea_len = rd32(ea_a + 0x30);
+    /* in one extent (the attribute list's further ones: not yet) */
+    if (rd32(ea_a + 0x10) || (ea_len && rd32(ea_a + 0x18) < (ea_len - 1) / (512UL << v->cshift)))
+        return OFS_NTFS_ENOSPACE;
+    return OFS_NTFS_OK;
+}
+
+/* n bytes of $EA's value at off */
+static int ea_get(struct ofs_ntfs *v, ofs_u32 off, void OFS_FAR *dst, ofs_u32 n)
+{
+    ofs_u8 OFS_FAR *d = (ofs_u8 OFS_FAR *)dst;
+    ofs_u32 in, k;
+    ofs_lba lba;
+    int rc;
+    if (off > ea_len || n > ea_len - off) return OFS_NTFS_EBAD;
+    if (!ea_a[8]) {
+        fmemcpy(d, ea_a + rd16(ea_a + 0x14) + off, n);
+        return OFS_NTFS_OK;
+    }
+    while (n) {
+        in = off & 511;
+        k = 512 - in < n ? 512 - in : n;
+        if ((rc = attr_sector(v, ea_a, off >> 9, &lba))) return rc;
+        if (lba == NOBUF) memset(eab, 0, sizeof(eab));
+        else if ((rc = blk_read(v, lba, eab))) return rc;
+        fmemcpy(d, eab + in, k);
+        d += k; off += k; n -= k;
+    }
+    return OFS_NTFS_OK;
+}
+
+/* the EA at *off: its header and name in eah (NUL-terminated), *off past
+   it, *at where it began */
+static int ea_next(struct ofs_ntfs *v, ofs_u32 *off, ofs_u32 *at)
+{
+    ofs_u32 need, next;
+    int rc;
+    if (*off + 8 > ea_len) return OFS_NTFS_EBAD;
+    if ((rc = ea_get(v, *off, eah, 8))) return rc;
+    need = 8UL + eah[5] + 1 + rd16(eah + 6);
+    next = rd32(eah);
+    if (!next) next = (need + 3) & ~3UL;
+    if (next < need || *off + need > ea_len) return OFS_NTFS_EBAD;
+    if ((rc = ea_get(v, *off + 8, eah + 8, eah[5] + 1UL))) return rc;
+    if (eah[8 + eah[5]]) return OFS_NTFS_EBAD;
+    *at = *off;
+    *off = *off + next > ea_len ? ea_len : *off + next;
+    return OFS_NTFS_OK;
+}
+
+static int ea_same(const char *a, const ofs_u8 *x, unsigned n)
+{
+    unsigned i;
+    for (i = 0; i < n; ++i) {
+        unsigned c = (ofs_u8)a[i], d = x[i];
+        if (c >= 'a' && c <= 'z') c -= 32;
+        if (d >= 'a' && d <= 'z') d -= 32;
+        if (c != d) return 0;
+    }
+    return !a[n];
+}
+
+int ofs_ntfs_ea_get(struct ofs_ntfs *v, struct ofs_ntfs_file *f, const char *name, void OFS_FAR *buf,
+                    ofs_u16 size, ofs_u16 *len)
+{
+    ofs_u32 off = 0, at;
+    int rc;
+    *len = 0;
+    if ((rc = ea_open(v, f->first))) return rc;
+    while (off < ea_len) {
+        if ((rc = ea_next(v, &off, &at))) return rc;
+        if (!ea_same(name, eah + 8, eah[5])) continue;
+        *len = rd16(eah + 6);
+        if (!size) return OFS_NTFS_OK;
+        if (*len > size) return OFS_NTFS_ERANGE;
+        return ea_get(v, at + 9 + eah[5], buf, *len);
+    }
+    return OFS_NTFS_ENOATTR;
+}
+
+int ofs_ntfs_ea_list(struct ofs_ntfs *v, struct ofs_ntfs_file *f, char OFS_FAR *buf, ofs_u16 size, ofs_u16 *len)
+{
+    ofs_u32 off = 0, at, total = 0;
+    unsigned i;
+    int rc;
+    *len = 0;
+    if ((rc = ea_open(v, f->first))) return rc;
+    while (off < ea_len) {
+        if ((rc = ea_next(v, &off, &at))) return rc;
+        if (size) {
+            if (total + eah[5] + 1 > size) return OFS_NTFS_ERANGE;
+            for (i = 0; i <= eah[5]; ++i) buf[total + i] = (char)eah[8 + i];
+        }
+        total += eah[5] + 1UL;
+        if (total > 0xFFFFUL) return OFS_NTFS_ERANGE;
+    }
+    *len = (ofs_u16)total;
+    return OFS_NTFS_OK;
+}
+
 #ifndef OFS_READONLY
 /* ---- writing, stage 1: overwriting in place ----
    Data that has its clusters (or its place in the MFT record) is written
@@ -1423,8 +1549,10 @@ static int log_reset(struct ofs_ntfs *v)
 /* The entries of record no in the index of directory dir (root and
    blocks): their duplicated information -- the times and attributes of
    si (a $STANDARD_INFORMATION value), the sizes -- as Windows keeps it
-   there for DIR.  Every entry: the Win32 and the DOS name. */
-static int dup_info(struct ofs_ntfs *v, ofs_u32 dir, ofs_u32 no, const ofs_u8 *si, ofs_u64 alloc, ofs_u64 size)
+   there for DIR, with ext the EA size too.  Every entry: the Win32
+   and the DOS name. */
+static int dup_info(struct ofs_ntfs *v, ofs_u32 dir, ofs_u32 no, const ofs_u8 *si, ofs_u64 alloc, ofs_u64 size,
+                    const ofs_u32 *ext)
 {
     const ofs_u8 *a, *val;
     ofs_u8 *base, *p, *key;
@@ -1458,6 +1586,7 @@ static int dup_info(struct ofs_ntfs *v, ofs_u32 dir, ofs_u32 no, const ofs_u8 *s
             wr64(key + 0x28, alloc);
             wr64(key + 0x30, size);
             wr32(key + 0x38, (rd32(key + 0x38) & F_DIR) | (rd32(si + 0x20) & ~F_DIR));
+            if (ext) wr32(key + 0x3C, *ext);
             changed = 1;
         }
         if (changed && (rc = blk < 0 ? write_rec(v, v->rec_no, v->rec) : write_idx(v))) return rc;
@@ -1473,19 +1602,21 @@ struct si_change {
 };
 
 static int finish_si(struct ofs_ntfs *v, struct ofs_ntfs_file *f, ofs_u16 time, ofs_u16 date, int sizes,
-                     const struct si_change *c);
+                     const struct si_change *c, const ofs_u32 *ext);
 
 /* $STANDARD_INFORMATION (the time written, the archive bit) and, with
    sizes, the sizes of the $FILE_NAMEs of the base record no (in rec2), the
    record written; then the entries in the directories (dup_info) */
 static int finish(struct ofs_ntfs *v, struct ofs_ntfs_file *f, ofs_u16 time, ofs_u16 date, int sizes)
 {
-    return finish_si(v, f, time, date, sizes, 0);
+    return finish_si(v, f, time, date, sizes, 0, 0);
 }
 
-/* the same, or with c the change asked for instead of the write's */
+/* the same, or with c the change asked for instead of the write's; with
+   ext the (unpacked) EA size into the $FILE_NAMEs and entries (not for a
+   reparse point, whose tag is there) */
 static int finish_si(struct ofs_ntfs *v, struct ofs_ntfs_file *f, ofs_u16 time, ofs_u16 date, int sizes,
-                     const struct si_change *c)
+                     const struct si_change *c, const ofs_u32 *ext)
 {
     ofs_u8 *val, *b, si[0x24];
     const ofs_u8 *a, *d;
@@ -1510,6 +1641,7 @@ static int finish_si(struct ofs_ntfs *v, struct ofs_ntfs_file *f, ofs_u16 time, 
         if (!(rd16(b + 0x16) & 2)) wr32(val + 0x20, rd32(val + 0x20) | OFS_NTFS_ARCH);   /* files only */
     }
     memcpy(si, val, 0x24);
+    if (rd32(si + 0x20) & 0x400) ext = 0;      /* a reparse point */
     if ((d = find_attr(v, b, AT_DATA, 0)))
         alloc = d[8] ? rd64(d + 0x28) : (rd32(d + 0x10) + 7) & ~7UL;
     for (a = b + rd16(b + 0x14); a + 0x18 <= b + v->rec_size && rd32(a) != AT_END; a += alen) {
@@ -1520,12 +1652,13 @@ static int finish_si(struct ofs_ntfs *v, struct ofs_ntfs_file *f, ofs_u16 time, 
                 wr64(val + 0x28, alloc);
                 wr64(val + 0x30, (ofs_u64)f->size);
             }
+            if (ext) wr32(val + 0x3C, *ext);
             if (!rd16(val + 4) && np < 4 && (!np || parent[np - 1] != rd32(val))) parent[np++] = rd32(val);
         }
     }
     if ((rc = write_rec(v, f->first, b))) return rc;
     for (i = 0; i < np; ++i)
-        if ((rc = dup_info(v, parent[i], f->first, si, alloc, (ofs_u64)f->size))) return rc;
+        if ((rc = dup_info(v, parent[i], f->first, si, alloc, (ofs_u64)f->size, ext))) return rc;
     return OFS_NTFS_OK;
 }
 
@@ -1591,7 +1724,7 @@ int ofs_ntfs_set_time(struct ofs_ntfs *v, struct ofs_ntfs_file *f, unsigned whic
     if (!v->write) return OFS_NTFS_EROFS;
     if (which != OFS_NTFS_CREATED && which != OFS_NTFS_WRITTEN && which != OFS_NTFS_READ) return OFS_NTFS_EBAD;
     c.at = (int)which; c.time = time; c.date = date; c.cs10 = cs10; c.attr = -1;
-    return finish_si(v, f, 0, 0, 0, &c);
+    return finish_si(v, f, 0, 0, 0, &c, 0);
 }
 
 int ofs_ntfs_set_attr(struct ofs_ntfs *v, struct ofs_ntfs_file *f, ofs_u8 attr)
@@ -1599,7 +1732,7 @@ int ofs_ntfs_set_attr(struct ofs_ntfs *v, struct ofs_ntfs_file *f, ofs_u8 attr)
     struct si_change c;
     if (!v->write) return OFS_NTFS_EROFS;
     c.at = -1; c.time = c.date = 0; c.cs10 = 0; c.attr = attr & 0x27;
-    return finish_si(v, f, 0, 0, 0, &c);
+    return finish_si(v, f, 0, 0, 0, &c, 0);
 }
 
 int ofs_ntfs_resize(struct ofs_ntfs *v, struct ofs_ntfs_file *f, ofs_fsize size, ofs_u16 time, ofs_u16 date)
@@ -2441,5 +2574,101 @@ int ofs_ntfs_create(struct ofs_ntfs *v, struct ofs_ntfs_file *dir, const ofs_u16
     wr32(v->ent, no); wr16(v->ent + 6, seq);
     if ((rc = idx_insert(v, dir->first, pos))) { mft_free(v, no); return rc; }
     return finish(v, dir, time, date, 0);
+}
+/* ---- extended attributes: setting (see above) ---- */
+
+/* attribute a out of record b */
+static void attr_remove(ofs_u8 *b, ofs_u8 *a)
+{
+    ofs_u32 used = rd32(b + 0x18), olen = rd32(a + 4), at = (ofs_u32)(a - b);
+    memmove(a, a + olen, used - at - olen);
+    memset(b + used - olen, 0, olen);
+    wr32(b + 0x18, used - olen);
+}
+
+static ofs_u8 ean[OFS_NTFS_MAXREC];   /* the new $EA value */
+
+int ofs_ntfs_ea_set(struct ofs_ntfs *v, struct ofs_ntfs_file *f, const char *name, const void OFS_FAR *val,
+                    ofs_u16 vlen, int how, ofs_u16 time, ofs_u16 date)
+{
+    struct si_change c;
+    ofs_u32 nl = (ofs_u32)strlen(name), off = 0, at, total = 0, packed = 0, need = 0, esz, used, room, i;
+    ofs_u8 *b, *info, *ea, *p;
+    int rc, found = 0;
+    if (!v->write) return OFS_NTFS_EROFS;
+    if (f->first < 16) return OFS_NTFS_EROFS;
+    if (!nl || nl > 255) return OFS_NTFS_ENAME;
+    if ((rc = ea_open(v, f->first))) return rc;
+    if (ea_len && (ea_a[8] || v->rec2_no != f->first)) return OFS_NTFS_ENOSPACE;
+    /* the new list: the others as they are, then this one */
+    while (off < ea_len) {
+        if ((rc = ea_next(v, &off, &at))) return rc;
+        if (ea_same(name, eah + 8, eah[5])) { found = 1; continue; }
+        esz = (8UL + eah[5] + 1 + rd16(eah + 6) + 3) & ~3UL;
+        if (total + esz > sizeof(ean)) return OFS_NTFS_ENOSPACE;
+        memset(ean + total, 0, esz);
+        if ((rc = ea_get(v, at, ean + total, 8UL + eah[5] + 1 + rd16(eah + 6)))) return rc;
+        wr32(ean + total, esz);
+        packed += 5UL + eah[5] + rd16(eah + 6);
+        if (eah[4] & 0x80) ++need;
+        total += esz;
+    }
+    if (how == OFS_NTFS_EA_CREATE && found) return OFS_NTFS_EEXIST;
+    if ((how == OFS_NTFS_EA_REPLACE || how == OFS_NTFS_EA_REMOVE) && !found) return OFS_NTFS_ENOATTR;
+    if (how != OFS_NTFS_EA_REMOVE) {
+        esz = (8UL + nl + 1 + vlen + 3) & ~3UL;
+        packed += 5UL + nl + vlen;
+        if (packed > 0xFFFFUL) return OFS_NTFS_EFULL;
+        if (total + esz > sizeof(ean)) return OFS_NTFS_ENOSPACE;
+        p = ean + total;
+        memset(p, 0, esz);
+        wr32(p, esz);
+        p[5] = (ofs_u8)nl;
+        wr16(p + 6, vlen);
+        memcpy(p + 8, name, nl);
+        fmemcpy(p + 9 + nl, val, vlen);
+        total += esz;
+    }
+    /* room in the base record (rec2) */
+    if ((rc = load_rec(v, f->first, v->rec2, &v->rec2_no))) return rc == OFS_NTFS_END ? OFS_NTFS_EBAD : rc;
+    b = v->rec2;
+    info = (ofs_u8 *)find_attr(v, b, AT_EAINFO, 0);
+    ea = (ofs_u8 *)find_attr(v, b, AT_EA, 0);
+    if ((info && (info[8] || rd32(info + 4) < 0x20)) || (!info && ea)) return OFS_NTFS_EBAD;
+    used = rd32(b + 0x18);
+    if (info) used -= rd32(info + 4);
+    if (ea) used -= rd32(ea + 4);
+    room = total ? 0x20 + ((0x18 + total + 7) & ~7UL) : 0;
+    if (used + room > rd32(b + 0x1C) || rd32(b + 0x1C) > v->rec_size) return OFS_NTFS_ENOSPACE;
+    if ((rc = log_reset(v))) return rc;
+    if (!total) {
+        if (ea) attr_remove(b, ea);
+        if ((info = (ofs_u8 *)find_attr(v, b, AT_EAINFO, 0))) attr_remove(b, info);
+    } else {
+        if (!info) {
+            if ((rc = attr_insert(v, b, AT_EAINFO, 0x20, &info))) { v->rec2_no = NONE; return rc; }
+            wr16(info + 0x0A, 0x18);
+            wr32(info + 0x10, 8);
+            wr16(info + 0x14, 0x18);
+        }
+        if (!(ea = (ofs_u8 *)find_attr(v, b, AT_EA, 0))) {
+            if ((rc = attr_insert(v, b, AT_EA, 0x18, &ea))) { v->rec2_no = NONE; return rc; }
+            wr16(ea + 0x0A, 0x18);
+            wr16(ea + 0x14, 0x18);
+        }
+        if ((rc = attr_resize(v, b, ea, (0x18 + total + 7) & ~7UL))) { v->rec2_no = NONE; return rc; }
+        wr32(ea + 0x10, total);
+        memcpy(ea + 0x18, ean, total);
+        for (i = 0x18 + total; i < rd32(ea + 4); ++i) ea[i] = 0;
+        info = (ofs_u8 *)find_attr(v, b, AT_EAINFO, 0);
+        wr16(info + 0x18, (ofs_u16)packed);
+        wr16(info + 0x1A, (ofs_u16)need);
+        wr32(info + 0x1C, total);
+    }
+    if ((rc = write_rec(v, f->first, b))) { v->rec2_no = NONE; return rc; }
+    /* the record changed time; the unpacked size into the $FILE_NAMEs */
+    c.at = 0x10; c.time = time; c.date = date; c.cs10 = 0; c.attr = -1;
+    if (!date) c.at = -1;
+    return finish_si(v, f, 0, 0, 0, &c, &total);
 }
 #endif
