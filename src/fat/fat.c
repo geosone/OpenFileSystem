@@ -460,6 +460,17 @@ int ofs_fat_read(struct ofs_fat *v, struct ofs_fat_file *f, ofs_u32 off, void OF
     return OFS_FAT_OK;
 }
 
+int ofs_fat_bmap(struct ofs_fat *v, struct ofs_fat_file *f, ofs_u32 off, ofs_lba *lba)
+{
+    ofs_u32 s;
+    int r;
+    if (f->dir || f->root) return OFS_FAT_EBAD;
+    if (off >= f->size || (off & ((1UL << v->sshift) - 1))) return OFS_FAT_END;
+    if ((r = file_sector(v, f, off, &s))) return r;
+    *lba = v->start + s;
+    return OFS_FAT_OK;
+}
+
 int ofs_fat_free(struct ofs_fat *v, ofs_u32 *free_clusters)
 {
     ofs_u32 c, val;

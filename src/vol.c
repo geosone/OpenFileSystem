@@ -901,6 +901,26 @@ int ofs_read(struct ofs_vol *v, struct ofs_node *n, ofs_fsize off, void OFS_FAR 
     return 0;
 }
 
+int ofs_bmap(struct ofs_vol *v, struct ofs_node *n, ofs_fsize off, ofs_lba *lba)
+{
+    int r = OFS_ENOTSUP;
+    (void)v; (void)off; (void)lba;
+    if (n->dir) return OFS_EISDIR;
+#ifndef OFS_NO_FAT
+    if (v->fs == &fs_fat) r = off >> 16 >> 16 ? OFS_FAT_END : ofs_fat_bmap(&v->u.fat, &n->u.fat.f, (ofs_u32)off, lba);
+#endif
+#ifndef OFS_NO_EXFAT
+    if (v->fs == &fs_exfat) r = ofs_exfat_bmap(&v->u.ex, &n->u.ex.f, off, lba);
+#endif
+#ifndef OFS_NO_NTFS
+    if (v->fs == &fs_ntfs) {
+        r = ofs_ntfs_bmap(&v->u.ntfs, &n->u.ntfs, off, lba);
+        r = r == OFS_NTFS_ENOSPACE ? OFS_ENOTSUP : nt_err(r);
+    }
+#endif
+    return r == 1 ? OFS_ERANGE : r;
+}
+
 int ofs_statfs(struct ofs_vol *v, ofs_u32 *free_clusters, ofs_u32 *cluster_bytes, ofs_u32 *clusters)
 {
     return v->fs->statfs(v, free_clusters, cluster_bytes, clusters);

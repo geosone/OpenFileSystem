@@ -18,7 +18,7 @@ H        := $(BUILD)/host
 
 TESTBINS := $(H)/test_exfat $(H)/test_exfat_write $(H)/test_exchk $(H)/test_exfmt \
 	$(H)/test_fatchk $(H)/test_defrag $(H)/test_fat_format $(H)/test_part $(H)/test_fat_write $(H)/test_exfat_big \
-	$(H)/ofimg $(H)/test_ntfs $(H)/test_texfat_crash $(H)/test_exdefrag $(H)/test_recover $(H)/test_lnk
+	$(H)/ofimg $(H)/test_ntfs $(H)/test_texfat_crash $(H)/test_exdefrag $(H)/test_recover $(H)/test_lnk $(H)/test_bmap
 
 .PHONY: ntfs-check fuse fuse-check all test check dos-check clean
 all: $(TESTBINS)
@@ -46,6 +46,7 @@ check: all test dos-check
 	bash tests/exfat_big.sh
 	bash tests/ofimg_host.sh
 	bash tests/ntfs_host.sh
+	sh tests/bmap_host.sh
 
 # the longer NTFS tests: random trees through ntfs-3g in all cluster sizes
 # (SEEDS from FIRST), a fragmented $MFT, and FUZZ damaged MFT records and
@@ -81,6 +82,9 @@ $(H)/test_lnk: tests/lnk_test.c src/lnk.c $(HDR)
 # TexFAT transactions against power failures (through the common interface)
 $(H)/test_texfat_crash: tests/texfat_crash_test.c src/vol.c src/exfat/exfat_check.c src/exfat/exfat_format.c $(EXFAT) $(HDR)
 $(H)/test_texfat_crash: CPPFLAGS += -DOFS_NO_FAT -DOFS_NO_NTFS -DOFS_NO_ISO -DOFS_NO_UDF
+# ofs_bmap of every core with sectors (FAT, exFAT, NTFS)
+$(H)/test_bmap: tests/bmap_test.c src/vol.c src/fat/fat.c src/fat/fat_ea.c src/exfat/exfat.c src/ntfs/ntfs.c src/dostime.c $(CPSRC) $(HDR)
+$(H)/test_bmap: CPPFLAGS += -DOFS_NO_ISO -DOFS_NO_UDF -DOFS_NTFS_MAXSECT=4096 -DOFS_FAT_MAXSECT=4096 -DOFS_EXFAT_MAXSECT=4096
 # the host tool for images (tools/ofimg.c)
 $(H)/ofimg: tools/ofimg.c src/exfat/exfat_format.c $(EXFAT) $(HDR)
 $(H)/test_fat_write: CPPFLAGS += -DOFS_FAT_MAXSECT=4096

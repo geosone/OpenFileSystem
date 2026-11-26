@@ -147,6 +147,11 @@ int ofs_ntfs_stat(struct ofs_ntfs *, struct ofs_ntfs_ent *);
 int ofs_ntfs_read(struct ofs_ntfs *, struct ofs_ntfs_file *, ofs_fsize off, void OFS_FAR *buf,
                    ofs_u16 len, ofs_u16 *done);
 int ofs_ntfs_free(struct ofs_ntfs *, ofs_u32 *free_clusters);
+/* the device sector holding byte off of a file (as ofs_fat_bmap): its
+   data non-resident and allocated there (OFS_NTFS_ENOSPACE for resident,
+   encrypted or compressed data and holes), off below the initialized size
+   (OFS_NTFS_END otherwise) */
+int ofs_ntfs_bmap(struct ofs_ntfs *, struct ofs_ntfs_file *, ofs_fsize off, ofs_lba *lba);
 /* 8.3 names (FCB form): the DOS name Windows gave it, else as exFAT does
    ("~n" for the n-th long name with the same basis). */
 int ofs_ntfs_short(struct ofs_ntfs *, struct ofs_ntfs_file *dir, const struct ofs_ntfs_ent *, char fcb[11]);

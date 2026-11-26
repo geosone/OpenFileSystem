@@ -170,6 +170,13 @@ int ofs_lookup(struct ofs_vol *, struct ofs_node *dir, const ofs_u16 *name, unsi
 int ofs_read(struct ofs_vol *, struct ofs_node *, ofs_fsize off, void OFS_FAR *buf,
              ofs_u32 len, ofs_u32 *done);
 /* free clusters and the bytes of one */
+/* the device sector (counted from the device's start, the host's lba)
+   that holds byte off of a file -- off a multiple of the device's sector
+   size, below the file's size: for writing a block of a file straight to
+   the device, past every cache (GonWare's MSAP block); OFS_ERANGE past
+   the end or not aligned, OFS_ENOTSUP where the data has no sectors of
+   its own (NTFS resident, compressed, a hole; ISO 9660, UDF) */
+int ofs_bmap(struct ofs_vol *, struct ofs_node *, ofs_fsize off, ofs_lba *lba);
 int ofs_statfs(struct ofs_vol *, ofs_u32 *free_clusters, ofs_u32 *cluster_bytes,
                ofs_u32 *clusters);
 

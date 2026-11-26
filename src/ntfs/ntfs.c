@@ -635,6 +635,28 @@ int ofs_ntfs_read(struct ofs_ntfs *v, struct ofs_ntfs_file *f, ofs_fsize off, vo
     return OFS_NTFS_OK;
 }
 
+int ofs_ntfs_bmap(struct ofs_ntfs *v, struct ofs_ntfs_file *f, ofs_fsize off, ofs_lba *lba)
+{
+    const ofs_u8 *a;
+    struct ofs_ntfs_run r;
+    ofs_u32 sec, vcn;
+    int rc;
+    if (f->nofat || f->root) return OFS_NTFS_ENOSPACE;      /* resident, encrypted, compressed */
+    if (off >= f->valid || (off & ((1UL << v->sshift) - 1))) return OFS_NTFS_END;
+    sec = (ofs_u32)(off >> 9);
+    vcn = sec >> v->cshift;
+    if (!f->rlen || vcn < f->idx || vcn - f->idx >= f->rlen) {
+        if ((rc = data_attr(v, f->first, vcn, &a))) return rc;
+        if (!a[8]) return OFS_NTFS_ENOSPACE;
+        if ((rc = attr_run(a, vcn, &r))) return rc == OFS_NTFS_END ? OFS_NTFS_EBAD : rc;
+        f->idx = r.vcn; f->clu = r.lcn; f->rlen = r.len;
+    }
+    if (f->clu == NONE) return OFS_NTFS_ENOSPACE;            /* a hole */
+    *lba = v->start + ((((ofs_lba)(f->clu + (vcn - f->idx)) << v->cshift) + (sec & ((1UL << v->cshift) - 1))) >>
+                       (v->sshift - 9));
+    return OFS_NTFS_OK;
+}
+
 /* attributes, time and size of record no into e (rec2) */
 static int stat_rec(struct ofs_ntfs *v, ofs_u32 no, struct ofs_ntfs_ent *e)
 {

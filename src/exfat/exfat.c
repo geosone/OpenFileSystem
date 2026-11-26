@@ -283,6 +283,17 @@ int ofs_exfat_read(struct ofs_exfat *v, struct ofs_exfat_file *f, ofs_fsize off,
     return OFS_EXFAT_OK;
 }
 
+int ofs_exfat_bmap(struct ofs_exfat *v, struct ofs_exfat_file *f, ofs_fsize off, ofs_lba *lba)
+{
+    ofs_lba s;
+    int r;
+    if (f->root) return OFS_EXFAT_EBAD;
+    if (off >= f->valid || (off & ((1UL << v->sshift) - 1))) return OFS_EXFAT_END;
+    if ((r = file_sector(v, f, off, &s))) return r;
+    *lba = v->start + s;
+    return OFS_EXFAT_OK;
+}
+
 int ofs_exfat_free(struct ofs_exfat *v, ofs_u32 *free_clusters)
 {
     struct ofs_exfat_file bm;

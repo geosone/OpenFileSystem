@@ -118,6 +118,11 @@ int ofs_fat_lookup(struct ofs_fat *, struct ofs_fat_file *dir, const char fcb[11
 int ofs_fat_read(struct ofs_fat *, struct ofs_fat_file *, ofs_u32 off, void OFS_FAR *buf,
                   ofs_u16 len, ofs_u16 *done);
 int ofs_fat_free(struct ofs_fat *, ofs_u32 *free_clusters);
+/* the device sector (counted from the device's start) that holds byte off
+   of a file, off a multiple of the sector size and below the file's size
+   (OFS_FAT_END otherwise): for a host that writes a block of a file
+   straight to the device, past every cache (GonWare's MSAP block) */
+int ofs_fat_bmap(struct ofs_fat *, struct ofs_fat_file *, ofs_u32 off, ofs_lba *lba);
 
 /* Writing.  Each call leaves the volume consistent; the dirty bit stays set
    until ofs_fat_clean. */

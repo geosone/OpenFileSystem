@@ -334,6 +334,16 @@ static int xattr(struct fs_node *dir, const char *name, int op, const char *ea, 
 	return r == OFS_ENOATTR ? FS_ENOATTR : r == OFS_ERANGE ? FS_ERANGE : r;
 }
 
+static int bmap(struct fs_node *n, uint64_t off, uint64_t *lba)
+{
+	ofs_lba l;
+	int r = ofs_bmap(VOL(n->vol), NODE(n), off, &l);
+	if (r)
+		return r == OFS_ERANGE ? FS_ERANGE : r == OFS_ENOTSUP ? FS_ENOTSUP : r;
+	*lba = l;
+	return FS_OK;
+}
+
 const struct fs_driver ofs_gw_driver = {
 	OFS_GW_NAME, probe, mount, root, lookup, readdir, read,
 #ifndef OFS_READONLY
@@ -348,6 +358,7 @@ const struct fs_driver ofs_gw_driver = {
 	NULL, NULL,
 #endif
 	xattr,
+	bmap,
 };
 
 /* from the module's init: its heap owner holds the volumes' buffers */

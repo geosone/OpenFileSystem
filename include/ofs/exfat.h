@@ -129,6 +129,9 @@ void ofs_exfat_rootdir(const struct ofs_exfat *, struct ofs_exfat_file *);
 int ofs_exfat_dir_next(struct ofs_exfat *, struct ofs_exfat_file *dir, ofs_u32 *pos, struct ofs_exfat_ent *);
 int ofs_exfat_read(struct ofs_exfat *, struct ofs_exfat_file *, ofs_fsize off, void OFS_FAR *buf, ofs_u16 len, ofs_u16 *done);
 int ofs_exfat_free(struct ofs_exfat *, ofs_u32 *free_clusters);
+/* the device sector holding byte off of a file (as ofs_fat_bmap); below
+   the valid data length, OFS_EXFAT_END otherwise */
+int ofs_exfat_bmap(struct ofs_exfat *, struct ofs_exfat_file *, ofs_fsize off, ofs_lba *lba);
 
 /* Writing.  dir is a directory as given by ofs_exfat_rootdir or by an entry
    (a FAT chained one with root set); dw the place of its own entry, which
