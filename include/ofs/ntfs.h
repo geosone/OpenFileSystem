@@ -198,6 +198,19 @@ int ofs_ntfs_set_attr(struct ofs_ntfs *, struct ofs_ntfs_file *, ofs_u8 attr);
    smaller than 2 KB. */
 int ofs_ntfs_create(struct ofs_ntfs *, struct ofs_ntfs_file *dir, const ofs_u16 *name, unsigned len, int is_dir,
                     ofs_u16 time, ofs_u16 date, ofs_u32 *pos);
+/* 1 when the directory dir has no entries, 0 when it has, or an error. */
+int ofs_ntfs_empty(struct ofs_ntfs *, struct ofs_ntfs_file *dir);
+/* Removes the file or (empty: OFS_NTFS_EEXIST else) directory of MFT
+   record no from dir: its names out of dir's index (an emptied index block
+   freed, the tree kept whole), its clusters free in $Bitmap, the record
+   free; dir's times set.  Renames it: its names out of dir, the new one
+   (name, len: a valid Win32 name) into to's index and its record, the
+   times and sizes kept; *pos where the entry is in to.  OFS_NTFS_ENOSPACE
+   (not yet): a name in another directory (a hard link), an attribute
+   list, an object ID or reparse point (their $Extend indexes). */
+int ofs_ntfs_remove(struct ofs_ntfs *, struct ofs_ntfs_file *dir, ofs_u32 no, ofs_u16 time, ofs_u16 date);
+int ofs_ntfs_rename(struct ofs_ntfs *, struct ofs_ntfs_file *dir, ofs_u32 no, struct ofs_ntfs_file *to,
+                    const ofs_u16 *name, unsigned len, ofs_u16 time, ofs_u16 date, ofs_u32 *pos);
 /* An extended attribute set (how: OFS_NTFS_EA_SET, _CREATE: EEXIST when it
    is there, _REPLACE: ENOATTR when not, _REMOVE: ENOATTR when not), in
    f's base record, resident as Windows keeps small ones; the record

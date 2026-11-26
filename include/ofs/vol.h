@@ -56,7 +56,7 @@
 
 /* what a mounted volume can do: write into files; and with it change their
    sizes; create, remove and rename names (else OFS_ENOTSUP).  NTFS has
-   OFS_CAP_WRITE and OFS_CAP_RESIZE so far (stages 1 and 2a). */
+   all three (stages 1, 2a, 2b and 2c). */
 #define OFS_CAP_WRITE  0x01
 #define OFS_CAP_RESIZE 0x02
 #define OFS_CAP_CREATE 0x04
@@ -205,7 +205,8 @@ int ofs_settime(struct ofs_vol *, struct ofs_node *dir, const ofs_u16 *name, uns
    not show and ofs_create and ofs_rename refuse as a name; ofs_remove and
    ofs_rename take it along), OFS_ENOTSUP elsewhere for now.  Names are
    1-255 bytes of the code page, compared without case; a file's EAs hold
-   at most 65535 bytes together.  ofs_setea: OFS_EA_SET, _CREATE (OFS_EEXIST
+   at most 65535 bytes together.  On NTFS (Windows NT's $EA) a name of
+   length 0 is dir itself (the root has a record too).  ofs_setea: OFS_EA_SET, _CREATE (OFS_EEXIST
    when it is there), _REPLACE (OFS_ENOATTR when not), _REMOVE. */
 int ofs_setea(struct ofs_vol *, struct ofs_node *dir, const ofs_u16 *name, unsigned len, const char *ea,
               const void OFS_FAR *val, ofs_u16 vlen, int how);

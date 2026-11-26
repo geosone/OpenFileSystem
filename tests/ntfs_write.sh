@@ -11,8 +11,13 @@
 # Stage 2b, creating: files with 8.3 and long names (also beyond Latin-1),
 # directories in directories, 600 files in a new directory and 200 more in
 # the root (index nodes split, the root moved into a block, $MFT grown),
-# written to afterwards. Refused: a name there in other case, a name
-# Win32 does not allow, removing, writing into a hole of a sparse file or
+# written to afterwards. Stage 2c, removing and renaming: files out of the
+# root and out of the 600 (index leaves emptied and their blocks freed, a
+# file with clusters), renamed in a directory and into another, a
+# directory moved, a file renamed over another (replaced), an empty
+# directory made and removed, a full one refused.
+# Refused: a name there in other case, a name
+# Win32 does not allow, writing into a hole of a sparse file or
 # into a compressed file. Then ntfsfix finds the volume clean, tests/ntfs_check.py
 # finds every cluster accounted for in $Bitmap and none used twice, ntfs-3g
 # reads every file as expected, and a written file has a new time (the
@@ -107,6 +112,16 @@ for v in 4096:512 512:512 4096:4096; do
     head -c 70000 /dev/urandom > "$d/r.bin"
     both 'cat "$d/r.bin" >> "$e/Neu viele/Datei mit einem längeren Namen 333.txt"'
     test "$(cat "$m/Neu viele/Datei mit einem längeren Namen 599.txt")" = 599 || fail "a new file reads back wrong"
+    # stage 2c, removing and renaming
+    both 'rm "$e/klein.txt"'
+    both 'i=0; while [ $i -lt 550 ]; do rm "$e/Neu viele/Datei mit einem längeren Namen $i.txt" || exit 1; i=$((i + 1)); done'
+    both 'i=0; while [ $i -lt 200 ]; do [ $((i % 3)) = 0 ] || rm "$e/R$i.DAT" || exit 1; i=$((i + 1)); done'
+    both 'i=550; while [ $i -lt 600 ]; do mv "$e/Neu viele/Datei mit einem längeren Namen $i.txt" "$e/Neu viele/D$i.txt" || exit 1; i=$((i + 1)); done'
+    both 'mv "$e/R0.DAT" "$e/R0 umbenannt.dat" && mv "$e/R3.DAT" "$e/Neu viele/R3.DAT" && mv "$e/a" "$e/Neu viele/a" && mv "$e/Neu viele/a" "$e/a"'
+    both 'mkdir "$e/leer" && rmdir "$e/leer"'
+    both 'echo wieder > "$e/klein.txt"'
+    refused "removing a directory with files" rmdir "$m/Neu viele"
+    both 'mv -f "$e/R6.DAT" "$e/R9.DAT"'                    # a file replaced
     # times and the read-only attribute (utimens, chmod)
     touch -m -d '2001-02-03 04:05:06.25' "$m/NEU.TXT" || fail "touch -d"
     touch -a -d '2002-03-04 05:06:07' "$m/NEU.TXT" || fail "touch -a -d"
@@ -150,7 +165,6 @@ assert os.listxattr(u) == []
 PY
     refused "a name there in other case" mkdir "$m/neu.txt"
     refused "a name Win32 does not allow" touch "$m/a:b"
-    refused "removing" rm "$m/klein.txt"
     refused "writing into a hole" dd if=/dev/zero of="$m/loch.dat" bs=100 count=1 seek=500000 \
         oflag=seek_bytes conv=notrunc status=none
     patch loch.dat 0 1

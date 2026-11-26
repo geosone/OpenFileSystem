@@ -514,6 +514,24 @@ static int nt_create(struct ofs_vol *v, struct ofs_node *dir, const ofs_u16 *nam
     return nt_err(ofs_ntfs_create(&v->u.ntfs, &dir->u.ntfs, name, len, is_dir, t, d, pos));
 }
 
+static int nt_empty(struct ofs_vol *v, struct ofs_node *dir) { return nt_err(ofs_ntfs_empty(&v->u.ntfs, &dir->u.ntfs)); }
+
+static int nt_remove(struct ofs_vol *v, struct ofs_node *dir, ofs_u32 pos)
+{
+    ofs_u16 t = 0, d = 0;
+    if (v->host.now) v->host.now(v->dev, &t, &d);
+    return nt_err(ofs_ntfs_remove(&v->u.ntfs, &dir->u.ntfs, pos, t, d));
+}
+
+static int nt_rename(struct ofs_vol *v, struct ofs_node *dir, ofs_u32 pos, struct ofs_node *to,
+                     const ofs_u16 *name, unsigned len)
+{
+    ofs_u16 t = 0, d = 0;
+    ofs_u32 newpos;
+    if (v->host.now) v->host.now(v->dev, &t, &d);
+    return nt_err(ofs_ntfs_rename(&v->u.ntfs, &dir->u.ntfs, pos, &to->u.ntfs, name, len, t, d, &newpos));
+}
+
 static int nt_setattr(struct ofs_vol *v, struct ofs_node *dir, ofs_u32 pos, struct ofs_node *n, ofs_u8 attr)
 {
     (void)dir; (void)pos;
@@ -557,7 +575,7 @@ static int nt_settime(struct ofs_vol *v, struct ofs_node *dir, ofs_u32 pos, stru
 static const struct ofs_fs fs_ntfs = {
     ofs_ntfs_probe, nt_mount, nt_root, nt_next, nt_lookup, nt_read, nt_statfs
 #ifndef OFS_READONLY
-    , nt_write, nt_resize, nt_create, NULL, NULL, NULL, NULL,
+    , nt_write, nt_resize, nt_create, nt_empty, nt_remove, nt_rename, NULL,
 #ifdef OFS_NARROW
     0xFFFFFFFFUL,
 #else
@@ -899,7 +917,7 @@ static int entry_pos(struct ofs_vol *v, const struct ofs_node *n, ofs_u32 *pos)
     if (v->fs == &fs_exfat) { *pos = n->u.ex.w.pos; return 0; }
 #endif
 #ifndef OFS_NO_NTFS
-    if (v->fs == &fs_ntfs) return OFS_ENOTSUP;  /* removing and renaming: not yet */
+    if (v->fs == &fs_ntfs) { *pos = n->u.ntfs.first; return 0; }   /* the record */
 #endif
     return OFS_EROFS;
 }
@@ -1294,6 +1312,9 @@ static int ea_call(struct ofs_vol *v, struct ofs_node *dir, const ofs_u16 *name,
     int r;
     *out = 0;
     if (!v->fs->ea && !sidecar(v)) return OFS_ENOTSUP;
+#ifndef OFS_NO_NTFS
+    if (!len && v->fs == &fs_ntfs) return v->fs->ea(v, dir, 0, dir, op, ea, buf, size, out);   /* dir itself */
+#endif
     if ((r = ofs_lookup(v, dir, name, len, &de))) return r;
 #ifndef OFS_NO_NTFS
     if (v->fs == &fs_ntfs) pos = 0;               /* NTFS takes the file itself */
