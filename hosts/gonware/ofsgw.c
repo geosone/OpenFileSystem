@@ -359,6 +359,7 @@ const struct fs_driver ofs_gw_driver = {
 #endif
 	xattr,
 	bmap,
+	NULL, NULL, NULL, /* open, dup, close: nothing kept per handle */
 };
 
 /* from the module's init: its heap owner holds the volumes' buffers */
